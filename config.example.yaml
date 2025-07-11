@@ -1,0 +1,103 @@
+# Example configuration for the AI Model Evaluator
+# Refer to the documentation for detailed explanations of each field.
+
+# 1. Basic Information
+project_info:
+  project_name: "Example Object Detection Model Evaluation"
+  run_id: "" # Optional: e.g., "20240715-1030-commit-abc123". If empty, a timestamp will be used.
+  model_version: "v1.0.0-alpha"
+  model_type: "detection"  # Supported: detection, classification, rotated_detection, pose
+
+# 2. Data Loader Configuration
+data_loader:
+  # Base directory for resolving relative image_path in CSV.
+  # For HTML reports to display images, these paths must be accessible.
+  image_base_dir: "/mnt/data/my_image_dataset/" # Example: "/path/to/user/image_dataset/"
+
+  field_mapping:
+    # Common fields expected for all model types (for performance evaluation)
+    # These are the names of the columns in your CSV file.
+    loop: "轮次ID"             # Column name for loop/run ID
+    image_id: "图片名"         # Column name for unique image identifier
+    image_path: "图片路径"     # Column name for relative or absolute path to the image
+    pre_time_ms: "前处理时间"
+    inference_time_ms: "推理时间"
+    post_time_ms: "后处理时间"
+    total_time_ms: "总耗时" # Can be "前+推理+后处理时间" or a dedicated column for total time
+
+    # Model-specific field mappings
+    detection:
+      category_id: "种类（标签）" # Column name for detected object's category/class ID
+      score: "置信度"           # Column name for detection confidence score
+      # Bounding box fields. Provide the list of column names from your CSV.
+      # The order matters if bbox_format is 'xyxy' or 'xywh' (center_x, center_y, width, height).
+      bbox: ["bbox_x", "bbox_y", "bbox_width", "bbox_height"] # Example for xywh
+      # bbox: ["x_min", "y_min", "x_max", "y_max"] # Example for xyxy
+
+    classification:
+      # For classification, Top-K fields are defined by patterns.
+      # '{k}' will be replaced by the actual K values from evaluation_params.classification.top_k
+      top_k_id_pattern: "top{k}_label_id"     # e.g., top1_label_id, top3_label_id
+      top_k_score_pattern: "top{k}_score" # e.g., top1_score, top3_score
+
+    rotated_detection:
+      category_id: "category"
+      score: "score"
+      # rbbox: [center_x, center_y, width, height, angle_degrees]
+      rbbox: ["cx", "cy", "w", "h", "angle"]
+
+    pose:
+      person_bbox: ["person_x", "person_y", "person_w", "person_h"] # Bbox for the detected person
+      person_score: "person_confidence"
+      # Keypoints string, e.g., "x1,y1,c1;x2,y2,c2;..."
+      # The parser will split by ';' then by ','
+      keypoints: "keypoints_str"
+
+
+# 3. Evaluation Parameters (model-specific sections)
+evaluation_params:
+  # Common performance evaluation parameters (if any in future)
+
+  detection:
+    iou_threshold: 0.5        # IoU threshold for matching objects across runs
+    z_score_threshold: 3.0    # For outlier detection in some stability metrics (example)
+    bbox_format: "xywh"       # Bounding box format in the CSV: "xywh" (center_x, center_y, width, height) or "xyxy" (x_min, y_min, x_max, y_max)
+    # Scoring weights for an overall stability score (optional, for future use)
+    scoring_weights:
+      performance: 0.2
+      stability: 0.8
+
+  classification:
+    top_k: [1, 3, 5]          # Which Top-K values to evaluate for consistency and ECE.
+    # other_classification_param: value
+
+  rotated_detection:
+    riou_threshold: 0.5
+    bbox_format: "xywha" # center_x, center_y, width, height, angle - for rbbox field mapping
+    # other_rotated_detection_param: value
+
+  pose:
+    oks_sigma: 0.5  # Sigma value for OKS calculation (COCO default is a list, often simplified to one value)
+    keypoint_layout: "coco_17" # Defines the keypoint names and skeleton for OKS and limb analysis.
+                               # Supported: "coco_17", "mpii_16" (planned)
+    match_iou_threshold: 0.5 # IoU threshold for matching persons across runs using person_bbox
+
+# 4. Report Generation Configuration
+report_settings:
+  output_dir: "./reports"     # Directory where reports and artifacts will be saved
+  formats: ["md", "html"]     # Desired report formats
+
+  display_images:             # Configuration for displaying images in HTML reports
+    enabled: true             # Master switch for image display in reports
+    max_per_category: 5       # Max images to show per anomaly category (e.g., top 5 IoU drift examples)
+    # For detection/pose, draw bounding boxes/skeletons on displayed images
+    draw_annotations: true
+
+  # Experimental AI Insights configuration
+  ai_insights:
+    enabled: false            # Set to true to enable AI-generated chart interpretations
+    model_name: "gpt-3.5-turbo" # LLM model to use (e.g., "gpt-4o", "claude-3-sonnet-20240229")
+    api_endpoint: "https://api.openai.com/v1/chat/completions" # LLM API endpoint
+    # API Key should be set via environment variable (e.g., OPENAI_API_KEY), not here.
+    # cache_responses: true # Whether to cache LLM responses to avoid redundant calls (default true if enabled)
+```

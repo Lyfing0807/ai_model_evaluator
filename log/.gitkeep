@@ -1,0 +1,2 @@
+# This file ensures the log/ directory is tracked by Git, even if empty.
+# Log files themselves should be in .gitignore.
