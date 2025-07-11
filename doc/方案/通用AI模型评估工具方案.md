@@ -63,7 +63,7 @@ graph TD
 
 1. 用户提供数据CSV文件和YAML配置文件。
 2. **配置管理器** 读取YAML，获取所有评估参数。
-3. **数据加载器** 根据配置加载CSV数据，支持`Pandas`和`Polars`(默认)引擎，并统一列名。
+3. **数据加载器** 根据配置加载CSV数据，支持`Polars`引擎，并统一列名。
 4. **评估引擎** 作为总控制器，将加载好的数据分发给评估模块。
 5. 引擎**首先调用**唯一的、所有模型共用的`通用性能评估器`，计算耗时、FPS等通用性能指标。
 6. 引擎**接着调用**`稳定性评估器工厂`，根据模型类型获取**专属的`稳定性评估器`**（如`检测模型稳定性评估器`），计算模型特定的稳定性指标。
@@ -88,7 +88,6 @@ project_info:
 
 # 2. 数据加载配置
 data_loader:
-  engine: "polars"  # 'polars' (推荐) 或 'pandas'
   image_base_dir: "/path/to/user/image_dataset/" # 指定图库的根目录，用于解析相对路径
   field_mapping:
     detection:
@@ -135,10 +134,10 @@ report_settings:
   display_images:             # [新增] 图片显示控制块
     enabled: true             # 总开关，设为false可完全禁止图片显示，提升报告生成速度
     max_per_category: 10      # 每个异常类别最多展示的图片数量，用于智能采样
-    # [新增] 实验性AI洞察功能配置
+  # 实验性AI洞察功能配置
   ai_insights:
     enabled: false # 默认为false, 用户需主动开启
-    model_name: "gpt-4o" # 允许用户根据成本和能力需求选择不同的LLM
+    model_name: "" # 允许用户根据成本和能力需求选择不同的LLM
     api_endpoint: "https://api.openai.com/v1/chat/completions" # 可配置的LLM API地址
     # api_key 建议通过环境变量传入，而非写在配置文件中
 ```
@@ -172,7 +171,7 @@ report_settings:
 **实施优化建议**:
 在代码实现中，应严格遵循**向量化操作优先**的原则，避免使用低效的 `for` 循环（如 `iterrows`）。
 
-- **对于Top-K聚合**: 可利用 Polars 的 `pl.concat_str` 表达式或 Pandas 的 `apply` 结合优化的函数，高效地将多个列合并为一个列表列。
+- **对于Top-K聚合**: 可利用 Polars 的 `pl.concat_str` 表达式，高效地将多个列合并为一个列表列。
 
 **2. 分类模型：Top-K 字段解析**
 
@@ -193,13 +192,13 @@ report_settings:
 
 2. **数据读取与转换**:
 
-      - 使用`Polars`或`Pandas`从CSV文件中读取包含上述动态生成列在内的所有必需数据。
+      - 使用`Polars`从CSV文件中读取包含上述动态生成列在内的所有必需数据。
       - **(关键步骤)** 为了方便下游的 `ClassificationEvaluator` 处理，加载器需要将这些离散的`Top-K`列**聚合转换**为两个列表类型的列。
 
 **实施优化建议**:
 在代码实现中，应严格遵循**向量化操作优先**的原则，避免使用低效的 `for` 循环（如 `iterrows`）。
 
-- **对于Top-K聚合**: 可利用 Polars 的 `pl.concat_str` 表达式或 Pandas 的 `apply` 结合优化的函数，高效地将多个列合并为一个列表列。
+- **对于Top-K聚合**: 可利用 Polars 的 `pl.concat_str` 表达式，高效地将多个列合并为一个列表列。
 
 **伪代码示例**:
 
@@ -401,7 +400,6 @@ sequenceDiagram
 
 ```python
 from dataclasses import dataclass, field
-import pandas as pd
 
 @dataclass
 class EvaluationResult:
@@ -687,6 +685,21 @@ ai_model_evaluator/
 ├── pyproject.toml           # 项目元数据和直接依赖的定义文件
 ├── requirements.lock        # 由uv生成的完全锁定的依赖文件
 │
+├── log/                     # 运行日志          
+├── examples/                # 交付给用户的运行示例
+│   ├── README.md            # 示例教程
+│   ├── classification/
+│   │   ├── input/
+│   │   │   ├── xxx.csv
+│   │   │   └──xxx.yaml
+│   │   └── output/
+│   │       ├── xxx.md
+│   │       ├── xxx.html
+│   │       └── ...
+│   ├── detection/
+│   │   └──...
+│   ├── ...
+|
 ├── ai_eval_tool/            # 核心源代码包
 │   ├── __init__.py
 │   ├── config_manager.py    # 负责加载、解析和校验YAML配置
@@ -720,20 +733,22 @@ ai_model_evaluator/
 │       ├── logging_config.py # 日志配置
 │       └── types.py          # 定义项目核心数据结构 (如EvaluationResult)
 │
-├── examples/                # 示例文件夹
-│   ├── classification_data.csv
-│   ├── classification_config.yaml
-│   ├── detection_data.csv
-│   └── detection_config.yaml
 │
 └── tests/                   # 测试代码文件夹
+    ├── input/
+    |   ├── configs/         # 测试配置文件,如yaml文件
+    |   └── datas/            # 测试数据文件夹，如csv文件
+    ├── tool/                # 测试工具文件夹, 如用来生成csv文件的脚本
+    ├── output/              # 测试生成的文件，如 .md .html
     ├── __init__.py
     ├── test_data_loader.py
     ├── test_engine.py
-    └── evaluators/
-        └── stability/
-            ├── test_classification.py
-            └── test_detection.py
+    ├── evaluators/
+    │   └── stability/
+    │       ├── test_classification.py
+    │       ├── test_detection.py
+    │       └── ...
+    └── (其他模块测试代码)
 ```
 
 ### **3.2 核心技术栈**
@@ -746,8 +761,7 @@ ai_model_evaluator/
 | **包与环境管理** | **uv** | 一个速度极快的Python包安装器和解析器。它将替代`pip`和`venv`，提供创建虚拟环境、安装/锁定依赖项的一体化解决方案，能极大提升本地开发和CI/CD流水线的效率。 |
 | **日志管理** | **loguru** | 极简的配置即可实现结构化、可旋转、带颜色的日志输出，其异常追踪功能可以清晰展示变量上下文，极大提升调试效率。 |
 | **数据处理** | **Polars** | **(首选)** 基于Rust的高性能DataFrame库，内存效率和计算速度优于Pandas，尤其适合处理大型CSV文件。 |
-| | **Pandas** | **(备选)** 作为可选的数据加载引擎，提供最广泛的兼容性和用户熟悉度。 |
-| | **NumPy** | 所有数值计算的基础，为Polars和Pandas提供底层支持。 |
+| | **NumPy** | 所有数值计算的基础，为Polars提供底层支持。 |
 | **配置管理** | **PyYAML** | 用于解析和加载`.yaml`配置文件。 |
 | | **Pydantic** | **(强烈推荐)** 用于对加载的配置进行严格的类型校验和数据模型转换，能极大地提升代码的健壮性，并自动生成清晰的错误提示。 |
 | **核心算法** | **SciPy** | 用于实现匈牙利算法 (`scipy.optimize.linear_sum_assignment`)，是目标匹配的核心。 |
@@ -774,7 +788,6 @@ requires-python = ">=3.9"
 # 项目的直接依赖项在此处定义
 dependencies = [
     "polars",
-    "pandas",
     "pyyaml",
     "pydantic",
     "scipy",
@@ -885,7 +898,7 @@ ENTRYPOINT ["python", "main_cli.py"]
 - **实现**:
     1. **评估引擎 (`EvaluationEngine`)** 在完成所有评估器（性能+稳定性）的计算后，不再直接将内存中的结果传递给报告生成器。
     2. 相反，它会将聚合后的最终评估结果（一个包含所有指标、图表数据、异常样本DataFrame等的富结构对象，即我们之前定义的 `EvaluationResult`）序列化，并保存到本地文件中。
-    3. **缓存文件格式**: 推荐使用 `Apache Parquet` 或 `Feather (Arrow IPC)` 格式。这些是专为数据分析设计的二进制列式存储格式，读写速度极快，且能完美保留 Polars/Pandas DataFrame 的复杂数据类型，远优于 Pickle 或 JSON。
+    3. **缓存文件格式**: 推荐使用 `Apache Parquet` 或 `Feather (Arrow IPC)` 格式。这些是专为数据分析设计的二进制列式存储格式，读写速度极快，且能完美保留 Polars DataFrame 的复杂数据类型，远优于 Pickle 或 JSON。
     4. **缓存文件命名**: 缓存文件应存放在报告输出目录 (`output_dir`) 下，并使用与本次运行高度相关的名称，例如：`{run_id}_eval_results.parquet`。
 
 ##### **2. 命令行工具 (`main_cli.py`) 功能增强**
