@@ -6,10 +6,10 @@ project_info:
 data_loader:
   image_base_dir: "../sample_images/"
   field_mapping:
-    loop: "eval_loop"
-    image_id: "source_image_id"
-    image_path: "image_file_path"
-    total_time_ms: "processing_time"
+    loop: "loop_id"
+    image_id: "image_id"
+    image_path: "image_path"
+    total_time_ms: "total_time_ms"
     rotated_detection:
       category_id: "obj_class"
       score: "obj_score"

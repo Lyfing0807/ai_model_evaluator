@@ -19,7 +19,7 @@ def test_load_valid_classification_config(classification_config: MainConfig):
     assert classification_config is not None
     assert classification_config.project_info.project_name == "Pytest Classification Project"
     assert classification_config.project_info.model_type == "classification"
-    assert classification_config.data_loader.field_mapping.classification.top_k_id_pattern == "label_k{k}"
+    assert classification_config.data_loader.field_mapping.classification.top_k_id_pattern == "pred_label_top{k}"
     assert classification_config.evaluation_params.classification is not None
     assert classification_config.evaluation_params.classification.top_k == [1, 3]
     assert "reports_classification" in str(classification_config.report_settings.output_dir)
@@ -96,7 +96,7 @@ def test_custom_validator_top_k(test_data_dir: Path):
     # Test invalid top_k: not sorted
     config_content = {
         "project_info": {"project_name": "TopK Test", "model_type": "classification"},
-        "data_loader": {"field_mapping": {"classification": {"top_k_id_pattern": "id{k}"}}},
+        "data_loader": {"field_mapping": {"classification": {"top_k_id_pattern": "pred_label_top{k}"}}},
         "evaluation_params": {"classification": {"top_k": [3, 1, 5]}}, # Not sorted
         "report_settings": {"output_dir": str(test_data_dir / "reports_topk_invalid")}
     }

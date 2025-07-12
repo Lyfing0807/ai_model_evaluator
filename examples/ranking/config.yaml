@@ -5,7 +5,7 @@ project_info:
 
 data_loader:
   field_mapping:
-    loop: "experiment_version"
+    loop: "loop_id"
     query_id: "user_id" # Using user_id as the query identifier
     # image_id and image_path are not typically used for ranking, can be omitted or set to null columns if common fields are enforced
     ranking:

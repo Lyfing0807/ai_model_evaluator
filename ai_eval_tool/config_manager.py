@@ -30,8 +30,8 @@ class DetectionFieldMapping(BaseModel):
     bbox: List[str] = ["bbox_x", "bbox_y", "bbox_width", "bbox_height"]
 
 class ClassificationFieldMapping(BaseModel):
-    top_k_id_pattern: str = "top{k}_label_id"
-    top_k_score_pattern: str = "top{k}_score"
+    top_k_id_pattern: str = "pred_label_top{k}"
+    top_k_score_pattern: str = "pred_score_top{k}"
 
 class RotatedDetectionFieldMapping(BaseModel):
     category_id: str = "category_id"
@@ -85,9 +85,26 @@ class ClassificationEvaluationParams(BaseModel):
     scoring_weights: Optional[Dict[str, float]] = Field(default_factory=lambda: {"prediction_consistency": 0.6, "confidence_reliability": 0.4})
     @validator('top_k')
     def top_k_rules(cls, v): # Shortened name
-        if not v: raise ValueError("top_k list cannot be empty")
-        if any(k <= 0 for k in v): raise ValueError("All k values must be positive")
-        if sorted(list(set(v))) != sorted(v): raise ValueError("top_k list must be sorted and unique")
+        if not v: 
+            raise ValueError(
+                "top_k list cannot be empty.\n"
+                "Please provide at least one positive integer value.\n"
+                "Example: top_k: [1, 3, 5]"
+            )
+        if any(k <= 0 for k in v): 
+            invalid_values = [k for k in v if k <= 0]
+            raise ValueError(
+                f"All k values must be positive integers. Found invalid values: {invalid_values}\n"
+                f"Please ensure all values in top_k are greater than 0.\n"
+                f"Example: top_k: [1, 3, 5]"
+            )
+        if sorted(list(set(v))) != sorted(v): 
+            raise ValueError(
+                f"top_k list must be sorted in ascending order and contain unique values.\n"
+                f"Current list: {v}\n"
+                f"Expected format: {sorted(list(set(v)))}\n"
+                f"Please sort the values and remove duplicates."
+            )
         return v
 
 class RotatedDetectionEvaluationParams(BaseModel):
@@ -112,9 +129,26 @@ class RankingEvaluationParams(BaseModel):
     scoring_weights: Optional[Dict[str, float]] = Field(default_factory=lambda: {"ndcg_stability": 0.4, "recall_stability": 0.3, "top_k_set_jaccard": 0.3})
     @validator('k_values')
     def k_values_rules(cls, v): # Shortened name
-        if not v: raise ValueError("k_values list cannot be empty")
-        if any(k <= 0 for k in v): raise ValueError("All k values must be positive")
-        if sorted(list(set(v))) != sorted(v): raise ValueError("k_values list must be sorted and unique")
+        if not v: 
+            raise ValueError(
+                "k_values list cannot be empty.\n"
+                "Please provide at least one positive integer value for ranking evaluation.\n"
+                "Example: k_values: [5, 10, 20]"
+            )
+        if any(k <= 0 for k in v): 
+            invalid_values = [k for k in v if k <= 0]
+            raise ValueError(
+                f"All k values must be positive integers. Found invalid values: {invalid_values}\n"
+                f"Please ensure all values in k_values are greater than 0.\n"
+                f"Example: k_values: [5, 10, 20]"
+            )
+        if sorted(list(set(v))) != sorted(v): 
+            raise ValueError(
+                f"k_values list must be sorted in ascending order and contain unique values.\n"
+                f"Current list: {v}\n"
+                f"Expected format: {sorted(list(set(v)))}\n"
+                f"Please sort the values and remove duplicates."
+            )
         return v
 
 class PerformanceEvaluationParams(BaseModel):
@@ -172,7 +206,14 @@ class MainConfig(BaseModel):
         model_type = values['project_info'].model_type
         # Performance params are always present due to default_factory
         if model_type != "performance" and not getattr(v, model_type, None) :
-            raise ValueError(f"evaluation_params for model_type '{model_type}' are missing.")
+            raise ValueError(
+                f"Missing evaluation parameters for model type '{model_type}'.\n"
+                f"Please add an 'evaluation_params.{model_type}' section to your configuration.\n"
+                f"Example:\n"
+                f"evaluation_params:\n"
+                f"  {model_type}:\n"
+                f"    # Add {model_type}-specific parameters here"
+            )
         return v
 
     @validator('data_loader')
@@ -181,16 +222,101 @@ class MainConfig(BaseModel):
         model_type = values['project_info'].model_type
         # Common fields are in FieldMapping itself. Check model-specific part.
         if not getattr(v.field_mapping, model_type, None) and model_type not in ["performance_only"]: # Example
-             raise ValueError(f"data_loader.field_mapping for model_type '{model_type}' is missing.")
+             raise ValueError(
+                 f"Missing field mapping for model type '{model_type}'.\n"
+                 f"Please add a 'data_loader.field_mapping.{model_type}' section to your configuration.\n"
+                 f"This section should map the column names in your CSV file to the expected field names.\n"
+                 f"Example:\n"
+                 f"data_loader:\n"
+                 f"  field_mapping:\n"
+                 f"    {model_type}:\n"
+                 f"      # Add {model_type}-specific field mappings here"
+             )
         return v
 
 def load_config(config_path: Union[str, Path]) -> MainConfig:
+    """
+    Loads and validates configuration from a YAML file.
+    
+    Args:
+        config_path: Path to the YAML configuration file
+        
+    Returns:
+        Validated MainConfig object
+        
+    Raises:
+        FileNotFoundError: If config file doesn't exist
+        yaml.YAMLError: If YAML parsing fails
+        ValueError: If configuration validation fails
+    """
     p = Path(config_path)
-    if not p.exists(): raise FileNotFoundError(f"Config file not found: {config_path}")
-    with open(p, 'r', encoding='utf-8') as f:
-        try: raw_config = yaml.safe_load(f)
-        except yaml.YAMLError as e: raise yaml.YAMLError(f"Error parsing YAML: {e}")
-    return MainConfig(**raw_config)
+    
+    # Check file existence with helpful message
+    if not p.exists():
+        raise FileNotFoundError(
+            f"Configuration file not found: {config_path}\n"
+            f"Please ensure the file exists and the path is correct.\n"
+            f"Expected file: {p.absolute()}"
+        )
+    
+    # Check if it's actually a file
+    if not p.is_file():
+        raise ValueError(f"Path exists but is not a file: {config_path}")
+    
+    # Load and parse YAML
+    try:
+        with open(p, 'r', encoding='utf-8') as f:
+            raw_config = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        raise yaml.YAMLError(
+            f"Failed to parse YAML configuration file: {config_path}\n"
+            f"YAML Error: {e}\n"
+            f"Please check the YAML syntax and ensure proper indentation."
+        )
+    except UnicodeDecodeError as e:
+        raise ValueError(
+            f"Failed to read configuration file due to encoding issues: {config_path}\n"
+            f"Error: {e}\n"
+            f"Please ensure the file is saved with UTF-8 encoding."
+        )
+    except Exception as e:
+        raise ValueError(f"Unexpected error reading configuration file {config_path}: {e}")
+    
+    # Check if YAML content is valid
+    if raw_config is None:
+        raise ValueError(
+            f"Configuration file is empty or contains only comments: {config_path}\n"
+            f"Please provide a valid YAML configuration."
+        )
+    
+    if not isinstance(raw_config, dict):
+        raise ValueError(
+            f"Configuration file must contain a YAML object (dictionary), got {type(raw_config).__name__}: {config_path}\n"
+            f"Please ensure your configuration starts with key-value pairs, not a list or scalar value."
+        )
+    
+    # Validate configuration with enhanced error messages
+    try:
+        return MainConfig(**raw_config)
+    except Exception as e:
+        # Enhanced error message for common configuration issues
+        error_msg = f"Configuration validation failed for file: {config_path}\n"
+        
+        if "project_info" not in raw_config:
+            error_msg += "Missing required section: 'project_info'\n"
+            error_msg += "Please add a project_info section with at least 'project_name' and 'model_type'.\n"
+        elif "model_type" not in raw_config.get("project_info", {}):
+            error_msg += "Missing required field: 'project_info.model_type'\n"
+            error_msg += "Please specify model_type as one of: detection, classification, rotated_detection, pose, tracking, ranking\n"
+        
+        if "data_loader" not in raw_config:
+            error_msg += "Missing required section: 'data_loader'\n"
+            error_msg += "Please add a data_loader section with field_mapping configuration.\n"
+        
+        # Add the original error for technical details
+        error_msg += f"\nDetailed error: {str(e)}"
+        
+        raise ValueError(error_msg) from e
 
 if __name__ == "__main__":
     # ... (existing __main__ block for testing detection and classification) ...
@@ -222,7 +348,7 @@ report_settings: {output_dir: "./test_reports_tracking"}
     dummy_ranking_config = """
 project_info:
   project_name: "Test Ranking Project"
-  model_type": "ranking"
+  model_type: "ranking"
 data_loader:
   field_mapping:
     loop: "run_version"

@@ -39,14 +39,14 @@ def rbox_to_shapely_polygon(rbox: List[float]) -> Polygon:
 
     # Rotate (around origin, as it's currently centered there)
     # Shapely's rotate takes angle in degrees, default origin is 'center' of polygon's bounding box
-    rotated_box = наклони_многоугольник(origin_box, angle_degrees, origin='center') # наклони_многоугольник is shapely.affinity.rotate
+    rotated_box = rotate_polygon(origin_box, angle_degrees, origin='center')
 
     # Translate to the correct center
     # shapely.affinity.translate
-    final_polygon = перемести_многоугольник(rotated_box, xoff=cx, yoff=cy) # перемести_многоугольник is shapely.affinity.translate
+    final_polygon = translate_polygon(rotated_box, xoff=cx, yoff=cy)
     return final_polygon
 
-from shapely.affinity import rotate as наклони_многоугольник, translate as перемести_многоугольник
+from shapely.affinity import rotate as rotate_polygon, translate as translate_polygon
 
 
 def calculate_riou_shapely(rbox1_params: List[float], rbox2_params: List[float]) -> float:

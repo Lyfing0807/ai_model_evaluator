@@ -13,6 +13,11 @@ from ai_eval_tool.evaluators.stability.factory import StabilityEvaluatorFactory
 from ai_eval_tool.evaluators.stability.factory import DummyDetectionEvaluator, DummyClassificationEvaluator
 
 
+def assert_frame_equal(df1: pl.DataFrame, df2: pl.DataFrame):
+    """Helper function to assert that two Polars DataFrames are equal."""
+    assert df1.frame_equal(df2), f"DataFrames are not equal.\nDF1:\n{df1}\nDF2:\n{df2}"
+
+
 # Fixture to ensure dummy evaluators are registered if not already by module import
 @pytest.fixture(autouse=True) # Autouse to ensure it runs for all tests in this module
 def register_dummy_evaluators_for_engine_tests():

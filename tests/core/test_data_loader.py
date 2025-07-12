@@ -1,9 +1,10 @@
 import pytest
 from pathlib import Path
 import polars as pl
+import yaml
 from polars.testing import assert_frame_equal
 
-from ai_eval_tool.config_manager import MainConfig
+from ai_eval_tool.config_manager import MainConfig, load_config
 from ai_eval_tool.data_loader import DataLoader
 
 def test_load_detection_data_xywh(detection_config: MainConfig, dummy_detection_csv_path: Path):

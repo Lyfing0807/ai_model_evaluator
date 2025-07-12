@@ -6,10 +6,10 @@ project_info:
 data_loader:
   image_base_dir: "../sample_images/"
   field_mapping:
-    loop: "iteration"
-    image_id: "image_tag"
-    image_path: "image_location"
-    total_time_ms: "pose_latency"
+    loop: "loop_id"
+    image_id: "image_id"
+    image_path: "image_path"
+    total_time_ms: "total_time_ms"
     pose:
       person_bbox: ["px", "py", "pw", "ph"] # xywh
       person_score: "person_det_score"

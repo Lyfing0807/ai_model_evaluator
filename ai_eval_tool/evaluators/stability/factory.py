@@ -5,11 +5,12 @@ from typing import Type, Dict
 from ...config_manager import MainConfig
 from ..base import StabilityEvaluatorBase # StabilityEvaluatorBase from ..base
 # Import concrete evaluators here. They will be registered.
-# For now, these will be placeholders.
-# from .detection import DetectionStabilityEvaluator
-# from .classification import ClassificationStabilityEvaluator
-# from .rotated_detection import RotatedDetectionStabilityEvaluator
-# from .pose import PoseStabilityEvaluator
+from .detection import DetectionStabilityEvaluator
+from .classification import ClassificationStabilityEvaluator
+from .rotated_detection import RotatedDetectionStabilityEvaluator
+from .pose import PoseStabilityEvaluator
+from .tracking import TrackingStabilityEvaluator
+from .ranking import RankingStabilityEvaluator
 from ...utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -60,14 +61,17 @@ class StabilityEvaluatorFactory:
         logger.info(f"Creating stability evaluator '{evaluator_class.__name__}' for model type '{model_type}'.")
         return evaluator_class(config)
 
-# Placeholder: Actual evaluators will be imported and registered later.
-# Example of how registration would look if done here:
-# from .detection import DetectionStabilityEvaluator # Assuming this exists
-# StabilityEvaluatorFactory.register_evaluator("detection", DetectionStabilityEvaluator)
+# Register actual evaluators
+StabilityEvaluatorFactory.register_evaluator("detection", DetectionStabilityEvaluator)
+StabilityEvaluatorFactory.register_evaluator("classification", ClassificationStabilityEvaluator)
+StabilityEvaluatorFactory.register_evaluator("rotated_detection", RotatedDetectionStabilityEvaluator)
+StabilityEvaluatorFactory.register_evaluator("pose", PoseStabilityEvaluator)
+StabilityEvaluatorFactory.register_evaluator("tracking", TrackingStabilityEvaluator)
+StabilityEvaluatorFactory.register_evaluator("ranking", RankingStabilityEvaluator)
 
 # For now, let's create dummy evaluators for testing the factory mechanism
 if __name__ == "__main__" or "pytest" in __import__("sys").modules: # Avoid side effects during normal import
-    from ....ai_eval_tool.utils.types import EvaluationResult # Adjust path for test context if needed
+    from ...utils.types import EvaluationResult # Adjust path for test context if needed
     import polars as pl
 
     class DummyDetectionEvaluator(StabilityEvaluatorBase):
@@ -86,7 +90,7 @@ if __name__ == "__main__" or "pytest" in __import__("sys").modules: # Avoid side
 
 if __name__ == "__main__":
     from pathlib import Path
-    from ....ai_eval_tool.config_manager import load_config # Adjust path for test context
+    from ...config_manager import load_config # Adjust path for test context
 
     # Create dummy configs for testing
     dummy_det_config_content = """
@@ -101,7 +105,7 @@ report_settings: {}
 project_info:
   project_name: "Factory Test Classification"
   model_type: "classification"
-data_loader: {field_mapping: {loop: l, image_id: i, image_path: p, pre_time_ms: t1, inference_time_ms: t2, post_time_ms: t3, total_time_ms: t4, classification: {top_k_id_pattern: "id{k}", top_k_score_pattern: "s{k}"}}}
+data_loader: {field_mapping: {loop: l, image_id: i, image_path: p, pre_time_ms: t1, inference_time_ms: t2, post_time_ms: t3, total_time_ms: t4, classification: {top_k_id_pattern: "pred_label_top{k}", top_k_score_pattern: "pred_score_top{k}"}}}
 evaluation_params: {classification: {top_k: [1]}}
 report_settings: {}
 """

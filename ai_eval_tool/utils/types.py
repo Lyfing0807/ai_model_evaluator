@@ -4,9 +4,22 @@ Core data structures and type definitions used throughout the application.
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Union
 import polars as pl
+# Type aliases for better code readability and type safety
+from pathlib import Path
+from typing import Optional
+
 # For plot objects, it's tricky. Matplotlib Figure, Plotly Figure, or just paths/HTML strings.
 # Using 'Any' for now, or can define a Union type if specific plot libraries are fixed.
 PlotObject = Any # Union[matplotlib.figure.Figure, plotly.graph_objects.Figure, str, Path]
+
+# Common type aliases
+MetricsDict = Dict[str, Union[float, int, str, bool, None, List[Any]]]
+PlotsDict = Dict[str, PlotObject]
+ExtraDataDict = Dict[str, Any]
+BoundingBox = List[float]  # [x_min, y_min, x_max, y_max]
+RotatedBoundingBox = List[float]  # [center_x, center_y, width, height, angle]
+Keypoints = List[List[float]]  # [[x1, y1, confidence1], [x2, y2, confidence2], ...]
+FilePath = Union[str, Path]
 
 @dataclass
 class EvaluationResult:
@@ -25,9 +38,9 @@ class EvaluationResult:
                     such as DataFrames of abnormal samples, intermediate calculations, etc.
                     Example: {"slow_samples_df": <polars.DataFrame object>}
     """
-    metrics: Dict[str, Union[float, int, str, bool, None, List[Any]]] = field(default_factory=dict)
-    plots: Dict[str, PlotObject] = field(default_factory=dict) # Plot objects or their representations
-    extra_data: Dict[str, Any] = field(default_factory=dict) # e.g., DataFrames of outliers
+    metrics: MetricsDict = field(default_factory=dict)
+    plots: PlotsDict = field(default_factory=dict) # Plot objects or their representations
+    extra_data: ExtraDataDict = field(default_factory=dict) # e.g., DataFrames of outliers
 
 
 if __name__ == "__main__":

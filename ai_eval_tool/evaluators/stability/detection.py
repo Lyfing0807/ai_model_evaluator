@@ -22,26 +22,61 @@ def calculate_iou(box1: List[float], box2: List[float]) -> float:
     """
     Calculates Intersection over Union (IoU) for two bounding boxes.
     Boxes are expected in [x_min, y_min, x_max, y_max] format.
+    
+    Args:
+        box1: First bounding box [x_min, y_min, x_max, y_max]
+        box2: Second bounding box [x_min, y_min, x_max, y_max]
+        
+    Returns:
+        IoU value between 0.0 and 1.0
+        
+    Raises:
+        ValueError: If boxes have invalid format or values
     """
-    x1_min, y1_min, x1_max, y1_max = box1
-    x2_min, y2_min, x2_max, y2_max = box2
+    try:
+        # Validate input format
+        if not isinstance(box1, (list, tuple)) or len(box1) != 4:
+            raise ValueError(f"box1 must be a list/tuple of 4 numbers, got: {box1}")
+        if not isinstance(box2, (list, tuple)) or len(box2) != 4:
+            raise ValueError(f"box2 must be a list/tuple of 4 numbers, got: {box2}")
+        
+        # Convert to float and validate
+        try:
+            x1_min, y1_min, x1_max, y1_max = [float(x) for x in box1]
+            x2_min, y2_min, x2_max, y2_max = [float(x) for x in box2]
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"Box coordinates must be numeric: {e}")
+        
+        # Validate box geometry
+        if x1_min >= x1_max or y1_min >= y1_max:
+            logger.warning(f"Invalid box1 geometry: {box1}")
+            return 0.0
+        if x2_min >= x2_max or y2_min >= y2_max:
+            logger.warning(f"Invalid box2 geometry: {box2}")
+            return 0.0
 
-    inter_x_min = max(x1_min, x2_min)
-    inter_y_min = max(y1_min, y2_min)
-    inter_x_max = min(x1_max, x2_max)
-    inter_y_max = min(y1_max, y2_max)
+        inter_x_min = max(x1_min, x2_min)
+        inter_y_min = max(y1_min, y2_min)
+        inter_x_max = min(x1_max, x2_max)
+        inter_y_max = min(y1_max, y2_max)
 
-    inter_width = max(0, inter_x_max - inter_x_min)
-    inter_height = max(0, inter_y_max - inter_y_min)
-    intersection_area = inter_width * inter_height
+        inter_width = max(0, inter_x_max - inter_x_min)
+        inter_height = max(0, inter_y_max - inter_y_min)
+        intersection_area = inter_width * inter_height
 
-    box1_area = (x1_max - x1_min) * (y1_max - y1_min)
-    box2_area = (x2_max - x2_min) * (y2_max - y2_min)
-    union_area = box1_area + box2_area - intersection_area
+        box1_area = (x1_max - x1_min) * (y1_max - y1_min)
+        box2_area = (x2_max - x2_min) * (y2_max - y2_min)
+        union_area = box1_area + box2_area - intersection_area
 
-    if union_area == 0:
+        if union_area <= 1e-10:  # Handle very small areas
+            return 0.0
+            
+        iou = intersection_area / union_area
+        return max(0.0, min(1.0, iou))  # Clamp to [0, 1]
+        
+    except Exception as e:
+        logger.error(f"Error calculating IoU for boxes {box1}, {box2}: {e}")
         return 0.0
-    return intersection_area / union_area
 
 class DetectionStabilityEvaluator(StabilityEvaluatorBase):
     def __init__(self, config: MainConfig):
@@ -196,33 +231,248 @@ class DetectionStabilityEvaluator(StabilityEvaluatorBase):
 
         return [avg_x_min, avg_y_min, avg_x_max, avg_y_max]
 
+    def _track_objects_batch_optimized(self, data_df: pl.DataFrame) -> pl.DataFrame:
+        """
+        Optimized batch processing for object tracking on large datasets.
+        
+        Args:
+            data_df: Input DataFrame with detection data
+            
+        Returns:
+            DataFrame with tracked_object_id column added
+        """
+        logger.info("Starting batch-optimized object tracking...")
+        
+        # Process images in batches to reduce memory usage
+        batch_size = 100  # Process 100 images at a time
+        unique_image_ids = data_df["image_id"].unique().to_list()
+        
+        tracked_dfs = []
+        
+        for i in range(0, len(unique_image_ids), batch_size):
+            batch_image_ids = unique_image_ids[i:i + batch_size]
+            batch_df = data_df.filter(pl.col("image_id").is_in(batch_image_ids))
+            
+            # Process this batch
+            batch_tracked = batch_df.group_by("image_id", maintain_order=True).apply(
+                self._track_objects_for_image_optimized
+            )
+            tracked_dfs.append(batch_tracked)
+            
+            if i % (batch_size * 10) == 0:  # Log progress every 1000 images
+                logger.info(f"Processed {min(i + batch_size, len(unique_image_ids))}/{len(unique_image_ids)} images")
+        
+        # Combine all batches
+        if tracked_dfs:
+            result_df = pl.concat(tracked_dfs, how="vertical")
+            logger.info("Batch-optimized object tracking completed")
+            return result_df
+        else:
+            return data_df.with_columns(pl.lit(None, dtype=pl.Int64).alias("tracked_object_id"))
+
+    def _track_objects_for_image_optimized(self, image_df: pl.DataFrame) -> pl.DataFrame:
+        """
+        Optimized version of object tracking for a single image.
+        Uses vectorized operations where possible.
+        """
+        if image_df.is_empty() or "loop" not in image_df.columns or "internal_bbox" not in image_df.columns:
+            return image_df.with_columns(pl.lit(None, dtype=pl.Int64).alias("tracked_object_id"))
+
+        # Sort by loop for sequential processing
+        image_df = image_df.sort("loop")
+        
+        # Convert to numpy for faster computation
+        loops = image_df["loop"].to_numpy()
+        bboxes = image_df["internal_bbox"].to_list()
+        
+        # Pre-allocate tracking results
+        tracked_ids = [-1] * len(image_df)
+        
+        # Group detections by loop for faster processing
+        loop_groups = {}
+        for idx, loop_id in enumerate(loops):
+            if loop_id not in loop_groups:
+                loop_groups[loop_id] = []
+            loop_groups[loop_id].append(idx)
+        
+        current_tracks = {}
+        next_track_id = 0
+        
+        # Process loops in order
+        for loop_id in sorted(loop_groups.keys()):
+            detection_indices = loop_groups[loop_id]
+            
+            if not current_tracks:  # First loop
+                for idx in detection_indices:
+                    tracked_ids[idx] = next_track_id
+                    current_tracks[next_track_id] = {
+                        'bbox': bboxes[idx],
+                        'last_seen': loop_id
+                    }
+                    next_track_id += 1
+            else:
+                # Match detections to existing tracks
+                matched_tracks, new_detections = self._match_detections_optimized(
+                    detection_indices, bboxes, current_tracks
+                )
+                
+                # Update matched tracks
+                for idx, track_id in matched_tracks.items():
+                    tracked_ids[idx] = track_id
+                    current_tracks[track_id]['bbox'] = bboxes[idx]
+                    current_tracks[track_id]['last_seen'] = loop_id
+                
+                # Create new tracks for unmatched detections
+                for idx in new_detections:
+                    tracked_ids[idx] = next_track_id
+                    current_tracks[next_track_id] = {
+                        'bbox': bboxes[idx],
+                        'last_seen': loop_id
+                    }
+                    next_track_id += 1
+        
+        return image_df.with_columns(pl.Series("tracked_object_id", tracked_ids, dtype=pl.Int64))
+
+    def _match_detections_optimized(self, detection_indices: List[int], bboxes: List[List[float]], 
+                                   current_tracks: Dict[int, Dict]) -> Tuple[Dict[int, int], List[int]]:
+        """
+        Optimized detection-to-track matching using vectorized IoU computation.
+        
+        Returns:
+            Tuple of (matched_detections_dict, unmatched_detection_indices)
+        """
+        if not current_tracks or not detection_indices:
+            return {}, detection_indices
+        
+        # Prepare arrays for vectorized computation
+        detection_bboxes = [bboxes[idx] for idx in detection_indices]
+        track_ids = list(current_tracks.keys())
+        track_bboxes = [current_tracks[tid]['bbox'] for tid in track_ids]
+        
+        # Compute IoU matrix using vectorized operations
+        iou_matrix = self._compute_iou_matrix_vectorized(detection_bboxes, track_bboxes)
+        
+        # Use Hungarian algorithm for optimal assignment
+        if iou_matrix.size > 0:
+            row_ind, col_ind = linear_sum_assignment(1.0 - iou_matrix)  # Minimize cost
+            
+            matched = {}
+            unmatched = list(range(len(detection_indices)))
+            
+            for r, c in zip(row_ind, col_ind):
+                if iou_matrix[r, c] >= self.iou_threshold:
+                    detection_idx = detection_indices[r]
+                    track_id = track_ids[c]
+                    matched[detection_idx] = track_id
+                    unmatched.remove(r)
+            
+            unmatched_indices = [detection_indices[i] for i in unmatched]
+            return matched, unmatched_indices
+        else:
+            return {}, detection_indices
+
+    def _compute_iou_matrix_vectorized(self, bboxes1: List[List[float]], 
+                                      bboxes2: List[List[float]]) -> np.ndarray:
+        """
+        Vectorized IoU computation for better performance.
+        
+        Args:
+            bboxes1: List of bounding boxes [x_min, y_min, x_max, y_max]
+            bboxes2: List of bounding boxes [x_min, y_min, x_max, y_max]
+            
+        Returns:
+            IoU matrix of shape (len(bboxes1), len(bboxes2))
+        """
+        if not bboxes1 or not bboxes2:
+            return np.array([])
+        
+        # Convert to numpy arrays for vectorized computation
+        boxes1 = np.array(bboxes1)  # Shape: (N, 4)
+        boxes2 = np.array(bboxes2)  # Shape: (M, 4)
+        
+        # Compute areas
+        areas1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+        areas2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+        
+        # Compute intersection
+        x_min = np.maximum(boxes1[:, 0:1], boxes2[:, 0])  # Broadcasting
+        y_min = np.maximum(boxes1[:, 1:2], boxes2[:, 1])
+        x_max = np.minimum(boxes1[:, 2:3], boxes2[:, 2])
+        y_max = np.minimum(boxes1[:, 3:4], boxes2[:, 3])
+        
+        intersection = np.maximum(0, x_max - x_min) * np.maximum(0, y_max - y_min)
+        
+        # Compute union and IoU
+        union = areas1[:, np.newaxis] + areas2 - intersection
+        iou = np.divide(intersection, union, out=np.zeros_like(intersection), where=union!=0)
+        
+        return iou
+
     def evaluate(self, data_df: pl.DataFrame) -> EvaluationResult:
         logger.info(f"Starting detection stability evaluation for model type {self.model_type}...")
 
-        required_cols = ["image_id", "loop", "internal_bbox", "category_id", "score"]
-        if not all(col in data_df.columns for col in required_cols):
-            missing_cols = [col for col in required_cols if col not in data_df.columns]
-            logger.error(f"Detection stability evaluation requires columns: {required_cols}. Missing: {missing_cols}")
-            return EvaluationResult(metrics={"error": f"Missing columns for detection stability: {missing_cols}"})
+        # Validate input DataFrame
+        if data_df is None:
+            raise ValueError("Input DataFrame cannot be None")
 
         if data_df.is_empty():
             logger.warning("Input DataFrame is empty for detection stability evaluation.")
             return EvaluationResult(metrics={"warning": "Empty input data for detection stability."})
 
+        required_cols = ["image_id", "loop", "internal_bbox", "category_id", "score"]
+        missing_cols = [col for col in required_cols if col not in data_df.columns]
+        if missing_cols:
+            logger.error(f"Detection stability evaluation requires columns: {required_cols}. Missing: {missing_cols}")
+            return EvaluationResult(metrics={"error": f"Missing columns for detection stability: {missing_cols}"})
+
+        # Validate data types and content
+        try:
+            # Ensure loop is numeric
+            if not data_df["loop"].dtype.is_numeric():
+                data_df = data_df.with_columns(pl.col("loop").cast(pl.Int64, strict=False))
+            
+            # Validate bbox format
+            bbox_sample = data_df["internal_bbox"].drop_nulls().first()
+            if bbox_sample is not None and (not isinstance(bbox_sample, list) or len(bbox_sample) != 4):
+                logger.error(f"Invalid bbox format. Expected list of 4 numbers, got: {type(bbox_sample)}")
+                return EvaluationResult(metrics={"error": "Invalid bbox format in internal_bbox column"})
+            
+            # Check for reasonable score values
+            score_stats = data_df["score"].drop_nulls()
+            if not score_stats.is_empty():
+                min_score, max_score = score_stats.min(), score_stats.max()
+                if min_score < 0 or max_score > 1:
+                    logger.warning(f"Score values outside [0,1] range: min={min_score}, max={max_score}")
+                    
+        except Exception as e:
+            logger.error(f"Data validation failed: {e}", exc_info=True)
+            return EvaluationResult(metrics={"error": f"Data validation failed: {e}"})
+
         logger.info("Performing object tracking across loops for each image...")
 
-        data_df = data_df.with_columns(pl.col("loop").cast(pl.Int64, strict=False))
+        # Check for minimum data requirements
+        unique_images = data_df["image_id"].n_unique()
+        unique_loops = data_df["loop"].n_unique()
+        
+        if unique_images == 0:
+            logger.warning("No unique images found in data")
+            return EvaluationResult(metrics={"warning": "No unique images found"})
+            
+        if unique_loops < 2:
+            logger.warning(f"Insufficient loops for stability analysis. Found {unique_loops}, need at least 2")
+            return EvaluationResult(metrics={"warning": f"Insufficient loops: {unique_loops} < 2"})
 
-        # Using group_by().apply() can be slow with Python UDFs on large number of groups.
-        # If performance becomes an issue, this part might need optimization (e.g. custom Rust plugin or more vectorized Polars ops if feasible).
-        # For now, clarity of Python UDF for tracking logic is prioritized.
+        # Optimize object tracking for large datasets
         try:
-            # Polars apply function needs to return a DataFrame.
-            # The self._track_objects_for_image already returns a DataFrame.
-            tracked_df = data_df.group_by("image_id", maintain_order=True).apply(self._track_objects_for_image)
+            if unique_images > 1000:  # For large datasets, use batch processing
+                logger.info(f"Large dataset detected ({unique_images} images). Using batch processing for object tracking.")
+                tracked_df = self._track_objects_batch_optimized(data_df)
+            else:
+                # Standard processing for smaller datasets
+                tracked_df = data_df.group_by("image_id", maintain_order=True).apply(self._track_objects_for_image)
         except Exception as e:
             logger.error(f"Error during object tracking: {e}", exc_info=True)
-            return EvaluationResult(metrics={"error": "Object tracking failed."})
+            return EvaluationResult(metrics={"error": f"Object tracking failed: {str(e)}"})
 
         logger.info("Object tracking completed.")
 

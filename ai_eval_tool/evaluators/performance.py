@@ -40,19 +40,41 @@ class PerformanceEvaluator(EvaluatorBase):
         plots: Dict[str, Any] = {} # Placeholder for plot objects
         extra_data: Dict[str, Any] = {} # Placeholder for data like outlier samples
 
+        # Validate input DataFrame
+        if data_df is None:
+            raise ValueError("Input DataFrame cannot be None")
+        
+        if data_df.is_empty():
+            logger.warning("Input DataFrame is empty for performance evaluation")
+            return EvaluationResult(metrics={"warning": "Empty input data for performance evaluation"}, plots={}, extra_data={})
+
         required_cols = [
             "total_time_ms", "pre_time_ms", "inference_time_ms", "post_time_ms",
             "loop", "image_id" # loop and image_id for deduplication
         ]
-        for col in required_cols:
-            if col not in data_df.columns:
-                logger.error(f"Missing required column for performance evaluation: {col}")
-                raise ValueError(f"Missing required column for performance evaluation: {col}")
+        missing_cols = [col for col in required_cols if col not in data_df.columns]
+        if missing_cols:
+            logger.error(f"Missing required columns for performance evaluation: {missing_cols}")
+            raise ValueError(f"Missing required columns for performance evaluation: {missing_cols}")
+        
+        # Validate data types for numeric columns
+        numeric_cols = ["total_time_ms", "pre_time_ms", "inference_time_ms", "post_time_ms"]
+        for col in numeric_cols:
+            if not data_df[col].dtype.is_numeric():
+                logger.warning(f"Column '{col}' is not numeric type: {data_df[col].dtype}. Attempting conversion.")
+                try:
+                    data_df = data_df.with_columns(pl.col(col).cast(pl.Float64, strict=False))
+                except Exception as e:
+                    raise ValueError(f"Failed to convert column '{col}' to numeric: {e}") from e
 
         # Deduplicate based on (loop, image_id) to ensure each inference event is counted once
         # This is crucial if the input CSV has one row per detected object for detection models.
-        perf_df = data_df.unique(subset=["loop", "image_id"], keep="first", maintain_order=True)
-        logger.info(f"Performance data deduplicated by (loop, image_id): {data_df.shape[0]} -> {perf_df.shape[0]} rows.")
+        try:
+            perf_df = data_df.unique(subset=["loop", "image_id"], keep="first", maintain_order=True)
+            logger.info(f"Performance data deduplicated by (loop, image_id): {data_df.shape[0]} -> {perf_df.shape[0]} rows.")
+        except Exception as e:
+            logger.error(f"Failed to deduplicate data: {e}", exc_info=True)
+            raise ValueError(f"Data deduplication failed: {e}") from e
 
         if perf_df.is_empty():
             logger.warning("No data available for performance evaluation after deduplication.")
@@ -64,15 +86,18 @@ class PerformanceEvaluator(EvaluatorBase):
              logger.warning("'total_time_ms' column is empty or all nulls.")
              return EvaluationResult(metrics={"warning": "'total_time_ms' is empty/all null"}, plots={}, extra_data={})
 
-
-        metrics["perf_mean_total_time_ms"] = total_time_series.mean()
-        metrics["perf_median_total_time_ms"] = total_time_series.median()
-        metrics["perf_std_total_time_ms"] = total_time_series.std()
-        metrics["perf_min_total_time_ms"] = total_time_series.min()
-        metrics["perf_max_total_time_ms"] = total_time_series.max()
-        metrics["perf_p90_total_time_ms"] = total_time_series.quantile(0.90, interpolation='linear')
-        metrics["perf_p95_total_time_ms"] = total_time_series.quantile(0.95, interpolation='linear')
-        metrics["perf_p99_total_time_ms"] = total_time_series.quantile(0.99, interpolation='linear')
+        try:
+            metrics["perf_mean_total_time_ms"] = total_time_series.mean()
+            metrics["perf_median_total_time_ms"] = total_time_series.median()
+            metrics["perf_std_total_time_ms"] = total_time_series.std()
+            metrics["perf_min_total_time_ms"] = total_time_series.min()
+            metrics["perf_max_total_time_ms"] = total_time_series.max()
+            metrics["perf_p90_total_time_ms"] = total_time_series.quantile(0.90, interpolation='linear')
+            metrics["perf_p95_total_time_ms"] = total_time_series.quantile(0.95, interpolation='linear')
+            metrics["perf_p99_total_time_ms"] = total_time_series.quantile(0.99, interpolation='linear')
+        except Exception as e:
+            logger.error(f"Failed to calculate basic performance statistics: {e}", exc_info=True)
+            return EvaluationResult(metrics={"error": f"Performance calculation failed: {e}"}, plots={}, extra_data={})
 
         if metrics["perf_mean_total_time_ms"] is not None and metrics["perf_mean_total_time_ms"] > 0:
             metrics["perf_avg_fps"] = 1000.0 / metrics["perf_mean_total_time_ms"]

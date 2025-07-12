@@ -81,13 +81,228 @@ class ReportGenerator:
         except Exception as e: logger.error(f"Failed to generate Plotly div for {fig_generator.__name__}: {e}", exc_info=True); return f"<p><i>Error generating Plotly chart: {fig_generator.__name__}.</i></p>"
 
     def _resolve_image_path(self, relative_path_str: Optional[str]) -> Optional[Path]:
-        if not relative_path_str: return None
-        relative_path = Path(relative_path_str)
-        if relative_path.is_absolute(): return relative_path if relative_path.exists() else None
-        if self.image_base_dir:
-            abs_path = self.image_base_dir / relative_path
-            return abs_path if abs_path.exists() else None
-        return None
+        """
+        Resolves image path with enhanced error handling and path normalization.
+        
+        Args:
+            relative_path_str: Image path string from CSV data
+            
+        Returns:
+            Absolute path to the image file if found, None otherwise
+        """
+        if not relative_path_str or not isinstance(relative_path_str, str):
+            return None
+            
+        try:
+            # Normalize path separators for cross-platform compatibility
+            normalized_path_str = relative_path_str.replace('\\', '/').strip()
+            relative_path = Path(normalized_path_str)
+            
+            # If already absolute and exists, return it
+            if relative_path.is_absolute():
+                return relative_path if relative_path.exists() and relative_path.is_file() else None
+            
+            # Try resolving relative to image_base_dir
+            if self.image_base_dir:
+                abs_path = self.image_base_dir / relative_path
+                if abs_path.exists() and abs_path.is_file():
+                    return abs_path.resolve()  # Resolve to canonical path
+            
+            # Try resolving relative to current working directory as fallback
+            cwd_path = Path.cwd() / relative_path
+            if cwd_path.exists() and cwd_path.is_file():
+                logger.debug(f"Found image relative to CWD: {cwd_path}")
+                return cwd_path.resolve()
+                
+            logger.debug(f"Could not resolve image path: {relative_path_str} (base_dir: {self.image_base_dir})")
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Error resolving image path '{relative_path_str}': {e}")
+            return None
+
+    def _process_image_for_report(self, resolved_img_path: Path, row_dict: Dict[str, Any], 
+                                 sample_index: int, run_id: str, annotated_img_subdir: Path, 
+                                 original_path_str: Optional[str]) -> Tuple[Optional[Path], Optional[Path]]:
+        """
+        Processes an image for report display: creates thumbnail and optionally annotated version.
+        
+        Args:
+            resolved_img_path: Absolute path to the source image
+            row_dict: Row data containing metadata
+            sample_index: Index of the sample for unique naming
+            run_id: Report run ID
+            annotated_img_subdir: Directory for processed images
+            original_path_str: Original path string for filename generation
+            
+        Returns:
+            Tuple of (thumbnail_rel_path, lightbox_rel_path) relative to report root
+        """
+        try:
+            # Generate safe filename components
+            img_name_slug = self._generate_safe_filename(original_path_str, sample_index)
+            loop_id = row_dict.get('loop', row_dict.get('loop_id', 'L'))
+            image_id_val = row_dict.get('image_id', row_dict.get('img_name', f'ID{sample_index}'))
+            
+            # Create base filename with sanitized components
+            base_filename = f"{img_name_slug}_{loop_id}_{image_id_val}"
+            base_filename = self._sanitize_filename(base_filename)
+            
+            # Validate and open source image
+            if not self._validate_image_file(resolved_img_path):
+                logger.warning(f"Invalid image file: {resolved_img_path}")
+                return None, None
+            
+            # Create thumbnail
+            thumbnail_rel_path = self._create_thumbnail(
+                resolved_img_path, base_filename, annotated_img_subdir, run_id
+            )
+            
+            # Create lightbox image (annotated or original copy)
+            lightbox_rel_path = self._create_lightbox_image(
+                resolved_img_path, base_filename, annotated_img_subdir, run_id, row_dict, original_path_str
+            )
+            
+            return thumbnail_rel_path, lightbox_rel_path
+            
+        except Exception as e:
+            logger.error(f"Error processing image {resolved_img_path} for report: {e}", exc_info=True)
+            return None, None
+
+    def _generate_safe_filename(self, original_path_str: Optional[str], sample_index: int) -> str:
+        """Generate a safe filename component from the original path."""
+        if original_path_str:
+            try:
+                return Path(original_path_str).stem.replace(" ", "_")[:50]  # Limit length
+            except Exception:
+                pass
+        return f"unknown_img_{sample_index}"
+
+    def _sanitize_filename(self, filename: str) -> str:
+        """Sanitize filename by removing/replacing problematic characters."""
+        import re
+        # Replace problematic characters with underscores
+        sanitized = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', filename)
+        # Remove multiple consecutive underscores
+        sanitized = re.sub(r'_+', '_', sanitized)
+        # Limit total length
+        return sanitized[:100]
+
+    def _validate_image_file(self, img_path: Path) -> bool:
+        """Validate that the file is a readable image."""
+        try:
+            with Image.open(img_path) as img:
+                img.verify()  # Verify it's a valid image
+            return True
+        except Exception as e:
+            logger.debug(f"Image validation failed for {img_path}: {e}")
+            return False
+
+    def _create_thumbnail(self, source_path: Path, base_filename: str, 
+                         output_dir: Path, run_id: str) -> Optional[Path]:
+        """Create a thumbnail image."""
+        try:
+            thumbnail_filename = f"thumb_{base_filename}.png"
+            thumbnail_abs_path = output_dir / thumbnail_filename
+            
+            with Image.open(source_path) as img:
+                # Convert to RGB if necessary (handles RGBA, P mode, etc.)
+                if img.mode in ('RGBA', 'LA', 'P'):
+                    img = img.convert('RGB')
+                
+                # Create thumbnail maintaining aspect ratio
+                img.thumbnail((200, 200), Image.Resampling.LANCZOS)
+                img.save(thumbnail_abs_path, 'PNG', optimize=True)
+                
+            return Path(run_id) / "charts" / "annotated_images" / thumbnail_filename
+            
+        except Exception as e:
+            logger.error(f"Failed to create thumbnail for {source_path}: {e}")
+            return None
+
+    def _create_lightbox_image(self, source_path: Path, base_filename: str, 
+                              output_dir: Path, run_id: str, row_dict: Dict[str, Any], 
+                              original_path_str: Optional[str]) -> Optional[Path]:
+        """Create lightbox image (annotated or copied original)."""
+        try:
+            if (self.report_settings.display_images.draw_annotations and 
+                self.project_info.model_type in ["detection", "pose", "rotated_detection"]):
+                
+                return self._create_annotated_image(
+                    source_path, base_filename, output_dir, run_id, row_dict
+                )
+            else:
+                return self._copy_original_image(
+                    source_path, base_filename, output_dir, run_id, original_path_str
+                )
+                
+        except Exception as e:
+            logger.error(f"Failed to create lightbox image for {source_path}: {e}")
+            return None
+
+    def _create_annotated_image(self, source_path: Path, base_filename: str, 
+                               output_dir: Path, run_id: str, row_dict: Dict[str, Any]) -> Optional[Path]:
+        """Create an annotated version of the image."""
+        try:
+            annotated_filename = f"annotated_{base_filename}.png"
+            annotated_abs_path = output_dir / annotated_filename
+            
+            with Image.open(source_path).convert("RGBA") as img:
+                draw = ImageDraw.Draw(img)
+                
+                # Add model-specific annotations
+                if self.project_info.model_type == "detection" and "internal_bbox" in row_dict:
+                    bbox = row_dict["internal_bbox"]
+                    if bbox and len(bbox) == 4:
+                        label = f"Cat: {row_dict.get('category_id', 'N/A')}, Score: {row_dict.get('score', 0.0):.2f}"
+                        _draw_bounding_box(draw, bbox, label=label)
+                
+                # TODO: Add annotations for pose and rotated_detection
+                
+                # Convert back to RGB for PNG saving
+                if img.mode == 'RGBA':
+                    # Create white background
+                    background = Image.new('RGB', img.size, (255, 255, 255))
+                    background.paste(img, mask=img.split()[-1])  # Use alpha channel as mask
+                    img = background
+                
+                img.save(annotated_abs_path, 'PNG', optimize=True)
+                
+            return Path(run_id) / "charts" / "annotated_images" / annotated_filename
+            
+        except Exception as e:
+            logger.error(f"Failed to create annotated image: {e}")
+            return None
+
+    def _copy_original_image(self, source_path: Path, base_filename: str, 
+                            output_dir: Path, run_id: str, original_path_str: Optional[str]) -> Optional[Path]:
+        """Copy the original image to the report directory."""
+        try:
+            # Preserve original extension if possible
+            original_suffix = Path(original_path_str).suffix if original_path_str else '.png'
+            if not original_suffix:
+                original_suffix = source_path.suffix or '.png'
+                
+            copied_filename = f"orig_{base_filename}{original_suffix}"
+            copied_abs_path = output_dir / copied_filename
+            
+            # Copy and optionally optimize
+            if original_suffix.lower() in ['.png', '.jpg', '.jpeg']:
+                # Optimize image while copying
+                with Image.open(source_path) as img:
+                    if img.mode in ('RGBA', 'LA', 'P'):
+                        img = img.convert('RGB')
+                    img.save(copied_abs_path, format='PNG' if original_suffix.lower() == '.png' else 'JPEG', 
+                            optimize=True, quality=85)
+            else:
+                # Direct copy for other formats
+                shutil.copy2(source_path, copied_abs_path)
+                
+            return Path(run_id) / "charts" / "annotated_images" / copied_filename
+            
+        except Exception as e:
+            logger.error(f"Failed to copy original image: {e}")
+            return None
 
     def _prepare_abnormal_samples_display_data(self, df: pl.DataFrame, category_name: str, sort_by_col: str, sort_ascending: bool, run_id: str, annotated_img_subdir: Path) -> List[Dict[str, Any]]:
         display_data = []
@@ -106,37 +321,9 @@ class ReportGenerator:
 
             thumbnail_rel_path, lightbox_rel_path = None, None
             if resolved_original_img_path:
-                try:
-                    img_name_slug = Path(original_img_path_str).stem.replace(" ", "_") if original_img_path_str else f"unknown_img_{i}"
-                    loop_id = row_dict.get('loop', row_dict.get('loop_id', 'L')) # Handle both possible column names
-                    image_id_val = row_dict.get('image_id', row_dict.get('img_name', f'ID{i}'))
-
-
-                    base_filename = f"{img_name_slug}_{loop_id}_{image_id_val}"
-                    thumbnail_filename = f"thumb_{base_filename}.png"
-                    thumbnail_abs_path = annotated_img_subdir / thumbnail_filename
-                    with Image.open(resolved_original_img_path) as img:
-                        img.thumbnail((200, 200)); img.save(thumbnail_abs_path)
-                    thumbnail_rel_path = Path(run_id) / "charts" / "annotated_images" / thumbnail_filename
-
-                    if self.report_settings.display_images.draw_annotations and self.project_info.model_type in ["detection", "pose", "rotated_detection"]:
-                        annotated_filename = f"annotated_{base_filename}.png"
-                        annotated_abs_path = annotated_img_subdir / annotated_filename
-                        with Image.open(resolved_original_img_path).convert("RGBA") as img_to_annotate: # RGBA for transparency
-                            draw = ImageDraw.Draw(img_to_annotate)
-                            if self.project_info.model_type == "detection" and "internal_bbox" in row_dict and row_dict["internal_bbox"]:
-                                label = f"Cat: {row_dict.get('category_id', 'N/A')}, Score: {row_dict.get('score', 0.0):.2f}"
-                                _draw_bounding_box(draw, row_dict["internal_bbox"], label=label)
-                            # TODO: Add drawing for rotated_detection and pose
-                            img_to_annotate.save(annotated_abs_path)
-                        lightbox_rel_path = Path(run_id) / "charts" / "annotated_images" / annotated_filename
-                    else:
-                        copied_orig_filename = f"orig_{base_filename}{Path(original_img_path_str).suffix if original_img_path_str else '.png'}"
-                        copied_orig_abs_path = annotated_img_subdir / copied_orig_filename
-                        shutil.copy(resolved_original_img_path, copied_orig_abs_path)
-                        lightbox_rel_path = Path(run_id) / "charts" / "annotated_images" / copied_orig_filename
-                except FileNotFoundError: logger.warning(f"Image not found for abnormal sample: {resolved_original_img_path}")
-                except Exception as e: logger.error(f"Error processing image {resolved_original_img_path} for report: {e}", exc_info=True)
+                thumbnail_rel_path, lightbox_rel_path = self._process_image_for_report(
+                    resolved_original_img_path, row_dict, i, run_id, annotated_img_subdir, original_img_path_str
+                )
             else: logger.warning(f"Could not resolve image path '{original_img_path_str}' (base dir: {self.image_base_dir}).")
 
             sample_info["thumbnail_path"] = str(thumbnail_rel_path) if thumbnail_rel_path else None

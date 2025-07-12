@@ -7,9 +7,9 @@ data_loader:
   image_base_dir: "../sample_images/" # Assuming sample_images is one level up from example execution
   field_mapping:
     loop: "loop_id"
-    image_id: "image_filename"
-    image_path: "relative_image_loc"
-    total_time_ms: "latency_ms" # Only total time for simplicity in this example
+    image_id: "image_id"
+    image_path: "image_path"
+    total_time_ms: "total_time_ms" # Only total time for simplicity in this example
     detection:
       category_id: "class_id"
       score: "confidence"

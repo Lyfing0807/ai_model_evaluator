@@ -37,7 +37,8 @@ class EvaluationEngine:
         all_extra_data: Dict[str, Any] = {}
 
         logger.info("Running Performance Evaluator...")
-        perf_results: EvaluationResult = self.performance_evaluator.evaluate(data_df.clone(strategy="deep"))
+        # Use shallow clone to save memory - evaluators should not modify the original data
+        perf_results: EvaluationResult = self.performance_evaluator.evaluate(data_df.clone())
         all_metrics.update(perf_results.metrics)
         all_extra_data.update(perf_results.extra_data)
         logger.info(f"Performance evaluation completed. Metrics calculated: {list(perf_results.metrics.keys())}")
@@ -46,7 +47,8 @@ class EvaluationEngine:
         logger.info(f"Attempting to run Stability Evaluator for model type: {model_type}...")
         try:
             stability_evaluator = self.stability_evaluator_factory.get_evaluator(model_type, self.config)
-            stability_results: EvaluationResult = stability_evaluator.evaluate(data_df.clone(strategy="deep"))
+            # Use shallow clone to save memory - evaluators should not modify the original data
+            stability_results: EvaluationResult = stability_evaluator.evaluate(data_df.clone())
             all_metrics.update(stability_results.metrics)
             all_extra_data.update(stability_results.extra_data)
             logger.info(f"Stability evaluation for {model_type} completed. Metrics calculated: {list(stability_results.metrics.keys())}")

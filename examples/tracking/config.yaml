@@ -6,11 +6,11 @@ project_info:
 data_loader:
   # image_base_dir: "../sample_images/" # Optional for tracking if not visualizing frames
   field_mapping:
-    loop: "run_id" # Multiple experiment runs of the same sequence
+    loop: "loop_id" # Multiple experiment runs of the same sequence
     frame_id: "frame_num"
     image_id: "frame_num" # Often frame_id is also the unique image identifier for tracking
     # image_path: "frame_image_path" # Optional if displaying frames
-    total_time_ms: "frame_processing_time" # Performance per frame
+    total_time_ms: "total_time_ms" # Performance per frame
     tracking:
       object_id_pred: "predicted_track_id"
       bbox_pred: ["px", "py", "pw", "ph"] # xywh

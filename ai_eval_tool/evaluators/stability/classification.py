@@ -292,8 +292,8 @@ data_loader:
     post_time_ms: "t_post"
     total_time_ms: "t_total"
     classification:
-      top_k_id_pattern: "label_k{k}" # e.g. label_k1, label_k3
-      top_k_score_pattern: "score_k{k}" # e.g. score_k1, score_k3
+      top_k_id_pattern: "pred_label_top{k}" # e.g. pred_label_top1, pred_label_top3
+      top_k_score_pattern: "pred_score_top{k}" # e.g. pred_score_top1, pred_score_top3
 evaluation_params:
   classification:
     top_k: [1, 3] # We will test for Top-1 and Top-3 consistency/jaccard

@@ -1,9 +1,11 @@
 """
 Data Loader: Handles loading and initial preprocessing of model output data from CSV files.
 """
-from typing import List, Tuple, Dict, Any
-import polars as pl
 from pathlib import Path
+from typing import Any, Dict, List, Tuple, Union
+
+import polars as pl
+
 from .config_manager import DataLoaderConfig, MainConfig
 from .utils.logging_config import get_logger
 
@@ -14,7 +16,7 @@ class DataLoader:
     Loads data from CSV files using Polars and performs initial transformations
     based on the provided configuration.
     """
-    def __init__(self, config: MainConfig): # Takes MainConfig to access model_type for specific parsing
+    def __init__(self, config: MainConfig):  # Takes MainConfig to access model_type for specific parsing
         self.main_config = config
         self.data_loader_config = config.data_loader
         self.model_type = config.project_info.model_type
@@ -22,6 +24,7 @@ class DataLoader:
     def load_data(self, csv_file_path: Union[str, Path]) -> pl.DataFrame:
         """
         Loads the CSV file into a Polars DataFrame and performs initial processing.
+        Optimized for memory usage with large datasets.
 
         Args:
             csv_file_path: Path to the input CSV file.
@@ -30,31 +33,331 @@ class DataLoader:
             A Polars DataFrame with standardized column names and processed fields.
         """
         logger.info(f"Loading data from CSV: {csv_file_path}")
+        
+        # Validate file existence and format
+        self._validate_csv_file(csv_file_path)
+        
         try:
-            df = pl.read_csv(csv_file_path)
+            # Memory optimization: Use lazy loading for large files
+            df = self._load_csv_optimized(csv_file_path)
         except Exception as e:
             logger.error(f"Failed to read CSV file {csv_file_path}: {e}")
-            raise
+            raise ValueError(f"CSV file reading failed: {e}") from e
+
+        # Validate basic DataFrame structure
+        self._validate_dataframe_structure(df)
 
         df = self._rename_common_columns(df)
+        
+        # Validate required columns after renaming
+        self._validate_required_columns(df)
 
         # Model-specific processing
-        if self.model_type == "detection":
-            df = self._process_detection_fields(df)
-        elif self.model_type == "classification":
-            df = self._process_classification_fields(df)
-        elif self.model_type == "rotated_detection":
-            df = self._process_rotated_detection_fields(df)
-        elif self.model_type == "pose":
-            df = self._process_pose_fields(df)
-        elif self.model_type == "tracking":
-            df = self._process_tracking_fields(df)
-        elif self.model_type == "ranking":
-            df = self._process_ranking_fields(df)
+        try:
+            if self.model_type == "detection":
+                df = self._process_detection_fields(df)
+            elif self.model_type == "classification":
+                df = self._process_classification_fields(df)
+            elif self.model_type == "rotated_detection":
+                df = self._process_rotated_detection_fields(df)
+            elif self.model_type == "pose":
+                df = self._process_pose_fields(df)
+            elif self.model_type == "tracking":
+                df = self._process_tracking_fields(df)
+            elif self.model_type == "ranking":
+                df = self._process_ranking_fields(df)
+            else:
+                logger.warning(f"Unknown model type '{self.model_type}', skipping model-specific processing.")
+        except Exception as e:
+            logger.error(f"Failed to process {self.model_type} specific fields: {e}", exc_info=True)
+            raise ValueError(f"Model-specific field processing failed for {self.model_type}: {e}") from e
 
+        # Final validation
+        self._validate_final_dataframe(df)
+        
         logger.info(f"Data loaded successfully. Shape: {df.shape}")
         logger.debug(f"DataFrame schema after loading:\n{df.schema}")
         return df
+
+    def _load_csv_optimized(self, csv_file_path: Union[str, Path]) -> pl.DataFrame:
+        """
+        Optimized CSV loading for large datasets with memory management.
+        
+        Args:
+            csv_file_path: Path to the input CSV file.
+            
+        Returns:
+            A Polars DataFrame loaded with memory optimizations.
+        """
+        file_path = Path(csv_file_path)
+        file_size_mb = file_path.stat().st_size / (1024 * 1024)
+        
+        if file_size_mb > 500:  # For files larger than 500MB
+            logger.info(f"Large file detected ({file_size_mb:.1f}MB). Using optimized loading strategy.")
+            # Use lazy loading and streaming for very large files
+            lazy_df = pl.scan_csv(csv_file_path, 
+                                 infer_schema_length=10000,  # Limit schema inference for speed
+                                 try_parse_dates=False)      # Skip date parsing for performance
+            # Collect with streaming to reduce memory usage
+            df = lazy_df.collect(streaming=True)
+        elif file_size_mb > 100:  # For files larger than 100MB
+            logger.info(f"Medium file detected ({file_size_mb:.1f}MB). Using memory-optimized loading.")
+            # Use chunked reading with optimized dtypes
+            df = pl.read_csv(csv_file_path, 
+                           low_memory=True,
+                           infer_schema_length=5000,   # Faster schema inference
+                           try_parse_dates=False,     # Skip date parsing
+                           rechunk=True)               # Optimize memory layout
+        elif file_size_mb > 10:  # For medium files 10-100MB
+            logger.info(f"Medium file detected ({file_size_mb:.1f}MB). Using standard optimized loading.")
+            df = pl.read_csv(csv_file_path,
+                           infer_schema_length=1000,   # Quick schema inference
+                           try_parse_dates=False)
+        else:
+            # Standard loading for smaller files
+            df = pl.read_csv(csv_file_path, try_parse_dates=False)
+            
+        logger.info(f"Loaded CSV with shape {df.shape}, memory usage optimized for {file_size_mb:.1f}MB file")
+        return self._optimize_memory_usage(df)
+
+    def _optimize_memory_usage(self, df: pl.DataFrame) -> pl.DataFrame:
+        """
+        Optimize DataFrame memory usage by downcasting numeric types where possible.
+        
+        Args:
+            df: Input DataFrame
+            
+        Returns:
+            Memory-optimized DataFrame
+        """
+        logger.debug("Optimizing DataFrame memory usage...")
+        
+        # Get memory usage before optimization
+        initial_memory = self._estimate_memory_usage(df)
+        
+        # Batch process columns for better performance
+        optimizations = []
+        
+        for col_name in df.columns:
+            dtype = df[col_name].dtype
+            
+            if dtype == pl.Int64:
+                # Use lazy evaluation to check min/max only once
+                col_stats = df.select([
+                    pl.col(col_name).min().alias("min_val"),
+                    pl.col(col_name).max().alias("max_val")
+                ]).row(0)
+                
+                col_min, col_max = col_stats
+                
+                if col_min is not None and col_max is not None:
+                    new_dtype = self._get_optimal_int_dtype(col_min, col_max)
+                    if new_dtype != pl.Int64:
+                        optimizations.append((col_name, new_dtype))
+            
+            elif dtype == pl.Float64:
+                # Check if we can downcast to Float32 without significant precision loss
+                if df[col_name].null_count() < df.height:  # Has non-null values
+                    # For most ML metrics, Float32 precision is sufficient
+                    optimizations.append((col_name, pl.Float32))
+            
+            elif dtype == pl.Utf8:
+                # Check if string column can be categorical for memory savings
+                unique_ratio = df[col_name].n_unique() / df.height
+                if unique_ratio < 0.5:  # Less than 50% unique values
+                    optimizations.append((col_name, pl.Categorical))
+        
+        # Apply all optimizations in batch
+        if optimizations:
+            cast_exprs = [pl.col(col_name).cast(new_dtype) for col_name, new_dtype in optimizations]
+            df = df.with_columns(cast_exprs)
+            
+            for col_name, new_dtype in optimizations:
+                logger.debug(f"Optimized {col_name} to {new_dtype}")
+        
+        # Get memory usage after optimization
+        final_memory = self._estimate_memory_usage(df)
+        memory_saved = initial_memory - final_memory
+        
+        if memory_saved > 0:
+            logger.info(f"Memory optimization saved {memory_saved:.2f}MB ({memory_saved/initial_memory*100:.1f}%)")
+        
+        logger.debug("Memory optimization completed")
+        return df
+
+    def _get_optimal_int_dtype(self, min_val: int, max_val: int) -> pl.DataType:
+        """Get the optimal integer data type for the given range."""
+        if min_val >= 0 and max_val <= 255:
+            return pl.UInt8
+        elif min_val >= -128 and max_val <= 127:
+            return pl.Int8
+        elif min_val >= 0 and max_val <= 65535:
+            return pl.UInt16
+        elif min_val >= -32768 and max_val <= 32767:
+            return pl.Int16
+        elif min_val >= 0 and max_val <= 4294967295:
+            return pl.UInt32
+        elif min_val >= -2147483648 and max_val <= 2147483647:
+            return pl.Int32
+        else:
+            return pl.Int64
+
+    def _estimate_memory_usage(self, df: pl.DataFrame) -> float:
+        """Estimate DataFrame memory usage in MB."""
+        try:
+            # Rough estimation based on data types and row count
+            memory_bytes = 0
+            for col_name in df.columns:
+                dtype = df[col_name].dtype
+                if dtype in [pl.Int8, pl.UInt8]:
+                    memory_bytes += df.height * 1
+                elif dtype in [pl.Int16, pl.UInt16]:
+                    memory_bytes += df.height * 2
+                elif dtype in [pl.Int32, pl.UInt32, pl.Float32]:
+                    memory_bytes += df.height * 4
+                elif dtype in [pl.Int64, pl.UInt64, pl.Float64]:
+                    memory_bytes += df.height * 8
+                elif dtype == pl.Utf8:
+                    # Rough estimate for strings
+                    avg_str_len = df[col_name].str.len_chars().mean() or 10
+                    memory_bytes += df.height * avg_str_len
+                else:
+                    # Default estimate
+                    memory_bytes += df.height * 8
+            
+            return memory_bytes / (1024 * 1024)  # Convert to MB
+        except Exception:
+            return 0.0  # Fallback if estimation fails
+
+    def _validate_csv_file(self, csv_file_path: Union[str, Path]) -> None:
+        """
+        Validates CSV file existence and basic format.
+        
+        Args:
+            csv_file_path: Path to the CSV file
+            
+        Raises:
+            FileNotFoundError: If file doesn't exist
+            ValueError: If file format is invalid
+        """
+        file_path = Path(csv_file_path)
+        
+        if not file_path.exists():
+            raise FileNotFoundError(f"CSV file not found: {file_path}")
+            
+        if not file_path.is_file():
+            raise ValueError(f"Path is not a file: {file_path}")
+            
+        if file_path.suffix.lower() not in ['.csv', '.tsv']:
+            logger.warning(f"File extension '{file_path.suffix}' is not .csv or .tsv, but will attempt to read as CSV")
+            
+        # Check if file is empty
+        if file_path.stat().st_size == 0:
+            raise ValueError(f"CSV file is empty: {file_path}")
+            
+        logger.debug(f"CSV file validation passed: {file_path}")
+
+    def _validate_dataframe_structure(self, df: pl.DataFrame) -> None:
+        """
+        Validates basic DataFrame structure after loading.
+        
+        Args:
+            df: Loaded DataFrame
+            
+        Raises:
+            ValueError: If DataFrame structure is invalid
+        """
+        if df.height == 0:
+            raise ValueError("CSV file contains no data rows")
+            
+        if df.width == 0:
+            raise ValueError("CSV file contains no columns")
+            
+        # Check for completely empty columns
+        empty_cols = [col for col in df.columns if df[col].null_count() == df.height]
+        if empty_cols:
+            logger.warning(f"Found completely empty columns: {empty_cols}")
+            
+        # Check for duplicate column names
+        if len(df.columns) != len(set(df.columns)):
+            duplicate_cols = [col for col in set(df.columns) if df.columns.count(col) > 1]
+            raise ValueError(f"Duplicate column names found: {duplicate_cols}")
+            
+        logger.debug(f"DataFrame structure validation passed: {df.shape}")
+
+    def _validate_required_columns(self, df: pl.DataFrame) -> None:
+        """
+        Validates that required columns are present after renaming.
+        
+        Args:
+            df: DataFrame after column renaming
+            
+        Raises:
+            ValueError: If required columns are missing
+        """
+        required_common_cols = []
+        
+        # Always require loop column for stability analysis
+        if hasattr(self.data_loader_config.field_mapping, 'loop') and self.data_loader_config.field_mapping.loop:
+            required_common_cols.append('loop')
+            
+        # Model-specific required columns
+        if self.model_type == "tracking":
+            required_common_cols.extend(['frame_id', 'object_id_pred'])
+        elif self.model_type == "ranking":
+            required_common_cols.append('query_id')
+        elif self.model_type in ["detection", "classification", "pose", "rotated_detection"]:
+            required_common_cols.append('image_id')
+            
+        missing_cols = [col for col in required_common_cols if col not in df.columns]
+        if missing_cols:
+            raise ValueError(f"Required columns missing after renaming: {missing_cols}")
+            
+        logger.debug(f"Required columns validation passed: {required_common_cols}")
+
+    def _validate_final_dataframe(self, df: pl.DataFrame) -> None:
+        """
+        Performs final validation on the processed DataFrame.
+        
+        Args:
+            df: Final processed DataFrame
+            
+        Raises:
+            ValueError: If final DataFrame is invalid
+        """
+        # Check for critical model-specific columns
+        model_specific_cols = []
+        
+        if self.model_type == "detection":
+            model_specific_cols = ['internal_bbox', 'category_id', 'score']
+        elif self.model_type == "classification":
+            model_specific_cols = ['top_k_labels', 'top_k_scores']
+        elif self.model_type == "rotated_detection":
+            model_specific_cols = ['internal_rbbox', 'category_id', 'score']
+        elif self.model_type == "pose":
+            model_specific_cols = ['internal_person_bbox', 'internal_keypoints', 'person_score']
+        elif self.model_type == "tracking":
+            model_specific_cols = ['internal_bbox_pred', 'object_id_pred']
+        elif self.model_type == "ranking":
+            model_specific_cols = ['internal_item_id_pred_list', 'internal_item_id_gt_list']
+            
+        missing_model_cols = [col for col in model_specific_cols if col not in df.columns]
+        if missing_model_cols:
+            raise ValueError(f"Model-specific columns missing: {missing_model_cols}")
+            
+        # Validate data types for critical numeric columns
+        numeric_cols = ['total_time_ms', 'pre_time_ms', 'inference_time_ms', 'post_time_ms']
+        for col in numeric_cols:
+            if col in df.columns and not df[col].dtype.is_numeric():
+                logger.warning(f"Column '{col}' is not numeric type: {df[col].dtype}")
+                
+        # Check for reasonable data ranges
+        if 'total_time_ms' in df.columns:
+            negative_times = df.filter(pl.col('total_time_ms') < 0).height
+            if negative_times > 0:
+                logger.warning(f"Found {negative_times} rows with negative total_time_ms")
+                
+        logger.debug("Final DataFrame validation passed")
 
     def _rename_common_columns(self, df: pl.DataFrame) -> pl.DataFrame:
         """Renames common columns based on field_mapping."""
@@ -100,7 +403,16 @@ class DataLoader:
         # Ensure bbox columns are numeric
         for col_name in bbox_cols:
             if not df[col_name].dtype.is_numeric():
-                 df = df.with_columns(pl.col(col_name).cast(pl.Float64, strict=False))
+                try:
+                    df = df.with_columns(pl.col(col_name).cast(pl.Float64, strict=False))
+                    logger.debug(f"Converted bbox column '{col_name}' to Float64")
+                except Exception as e:
+                    raise ValueError(f"Failed to convert bbox column '{col_name}' to numeric: {e}") from e
+            
+            # Check for invalid bbox values
+            invalid_count = df.filter(pl.col(col_name).is_null() | pl.col(col_name).is_infinite()).height
+            if invalid_count > 0:
+                logger.warning(f"Found {invalid_count} invalid values in bbox column '{col_name}'")
 
 
         bbox_exprs = [pl.col(c) for c in bbox_cols]
@@ -194,7 +506,16 @@ class DataLoader:
 
         for col_name in rbbox_cols:
             if not df[col_name].dtype.is_numeric():
-                 df = df.with_columns(pl.col(col_name).cast(pl.Float64, strict=False))
+                try:
+                    df = df.with_columns(pl.col(col_name).cast(pl.Float64, strict=False))
+                    logger.debug(f"Converted rbbox column '{col_name}' to Float64")
+                except Exception as e:
+                    raise ValueError(f"Failed to convert rbbox column '{col_name}' to numeric: {e}") from e
+            
+            # Check for invalid rbbox values
+            invalid_count = df.filter(pl.col(col_name).is_null() | pl.col(col_name).is_infinite()).height
+            if invalid_count > 0:
+                logger.warning(f"Found {invalid_count} invalid values in rbbox column '{col_name}'")
 
         rbbox_exprs = [pl.col(c) for c in rbbox_cols]
         df = df.with_columns(internal_rbbox=pl.concat_list(rbbox_exprs))
@@ -225,8 +546,12 @@ class DataLoader:
             raise ValueError(f"Missing person_bbox columns: {person_bbox_cols}")
 
         for col_name in person_bbox_cols:
-             if not df[col_name].dtype.is_numeric():
-                 df = df.with_columns(pl.col(col_name).cast(pl.Float64, strict=False))
+            if not df[col_name].dtype.is_numeric():
+                try:
+                    df = df.with_columns(pl.col(col_name).cast(pl.Float64, strict=False))
+                    logger.debug(f"Converted person_bbox column '{col_name}' to Float64")
+                except Exception as e:
+                    raise ValueError(f"Failed to convert person_bbox column '{col_name}' to numeric: {e}") from e
 
         # For consistency, let's create an internal_person_bbox (xyxy) like detection
         # Assuming person_bbox_cols are [x, y, w, h] from config
@@ -237,7 +562,6 @@ class DataLoader:
         y_max = y_c + h / 2
         df = df.with_columns(internal_person_bbox=pl.concat_list([x_min, y_min, x_max, y_max]))
         logger.info("Standardized 'person_bbox' (xywh) to 'internal_person_bbox' (xyxy).")
-
 
         # Process keypoints string: "x1,y1,c1;x2,y2,c2;..."
         # This will be parsed into a list of lists/tuples of floats: [[x1,y1,c1], [x2,y2,c2], ...]
@@ -288,7 +612,7 @@ class DataLoader:
             raise ValueError("Tracking evaluation parameters missing for bbox processing.")
 
         # Rename common tracking fields (object_id_pred, category_id_pred, score_pred)
-        rename_dict: Dict[str,str] = {}
+        rename_dict: Dict[str, str] = {}
         if mapping.object_id_pred in df.columns and mapping.object_id_pred != "object_id_pred":
             rename_dict[mapping.object_id_pred] = "object_id_pred"
         if mapping.category_id_pred and mapping.category_id_pred in df.columns and mapping.category_id_pred != "category_id_pred":
@@ -314,9 +638,9 @@ class DataLoader:
         if not all(col in df.columns for col in bbox_pred_cols):
             logger.error(f"One or more bbox_pred columns {bbox_pred_cols} not found.")
             raise ValueError(f"Missing bbox_pred columns: {bbox_pred_cols}")
-        for col_name in bbox_pred_cols: # Ensure numeric
+        for col_name in bbox_pred_cols:  # Ensure numeric
             if not df[col_name].dtype.is_numeric():
-                 df = df.with_columns(pl.col(col_name).cast(pl.Float64, strict=False))
+                df = df.with_columns(pl.col(col_name).cast(pl.Float64, strict=False))
 
         pred_exprs = [pl.col(c) for c in bbox_pred_cols]
         if eval_params.bbox_pred_format == "xywh":
@@ -324,29 +648,30 @@ class DataLoader:
             df = df.with_columns(internal_bbox_pred=pl.concat_list([x_c - w / 2, y_c - h / 2, x_c + w / 2, y_c + h / 2]))
         elif eval_params.bbox_pred_format == "xyxy":
             df = df.with_columns(internal_bbox_pred=pl.concat_list(pred_exprs))
-        else: raise ValueError(f"Unsupported bbox_pred_format: {eval_params.bbox_pred_format}")
+        else:
+            raise ValueError(f"Unsupported bbox_pred_format: {eval_params.bbox_pred_format}")
         logger.info("Standardized 'bbox_pred' to 'internal_bbox_pred' (xyxy).")
 
         # Process GT bboxes (if configured and present)
         if mapping.bbox_gt and all(col in df.columns for col in mapping.bbox_gt):
             bbox_gt_cols = mapping.bbox_gt
-            for col_name in bbox_gt_cols: # Ensure numeric
+            for col_name in bbox_gt_cols:  # Ensure numeric
                 if not df[col_name].dtype.is_numeric():
                     df = df.with_columns(pl.col(col_name).cast(pl.Float64, strict=False))
 
             gt_exprs = [pl.col(c) for c in bbox_gt_cols]
-            gt_format = eval_params.bbox_gt_format or "xywh" # Default to xywh if not specified for GT
+            gt_format = eval_params.bbox_gt_format or "xywh"  # Default to xywh if not specified for GT
             if gt_format == "xywh":
                 x_c, y_c, w, h = gt_exprs
                 df = df.with_columns(internal_bbox_gt=pl.concat_list([x_c - w / 2, y_c - h / 2, x_c + w / 2, y_c + h / 2]))
             elif gt_format == "xyxy":
                 df = df.with_columns(internal_bbox_gt=pl.concat_list(gt_exprs))
-            else: raise ValueError(f"Unsupported bbox_gt_format: {gt_format}")
+            else:
+                raise ValueError(f"Unsupported bbox_gt_format: {gt_format}")
             logger.info("Standardized 'bbox_gt' to 'internal_bbox_gt' (xyxy).")
-        elif mapping.bbox_gt: # Configured but not all columns present
+        elif mapping.bbox_gt:  # Configured but not all columns present
             logger.warning(f"bbox_gt columns {mapping.bbox_gt} configured but not all found in DataFrame. Skipping GT bbox processing.")
             df = df.with_columns(internal_bbox_gt=pl.lit(None, dtype=pl.List(pl.Float64)))
-
 
         # Ensure frame_id is present (renamed from common mapping if needed)
         if "frame_id" not in df.columns:
@@ -375,13 +700,12 @@ class DataLoader:
 
         # Common fields like query_id, loop_id should be handled by _rename_common_columns
         # Ensure query_id is present
-        if "query_id" not in df.columns: # Check for the standardized name
+        if "query_id" not in df.columns:  # Check for the standardized name
             # Check if original name from mapping exists, if so it means renaming failed or wasn't applied yet.
             # This check should ideally be after all renaming.
             # For now, assume common renaming has run.
             logger.error(f"'query_id' column (mapped from '{self.data_loader_config.field_mapping.query_id}') not found after common renaming.")
             raise ValueError("Standardized 'query_id' column not found for ranking model.")
-
 
         list_delimiter = mapping.list_delimiter
 
@@ -394,7 +718,7 @@ class DataLoader:
             df = df.with_columns(
                 internal_item_id_pred_list=pl.col(pred_list_col)
                 .str.split(list_delimiter)
-                # .list.eval(pl.element().cast(pl.Int64, strict=False)) # Optional: if IDs are numeric
+                # .list.eval(pl.element().cast(pl.Int64, strict=False))  # Optional: if IDs are numeric
             )
             logger.info(f"Processed '{pred_list_col}' into 'internal_item_id_pred_list'.")
         else:
@@ -408,13 +732,12 @@ class DataLoader:
                 df = df.with_columns(
                     internal_score_pred_list=pl.col(score_list_col)
                     .str.split(list_delimiter)
-                    .list.eval(pl.element().cast(pl.Float64, strict=False)) # Scores are usually float
+                    .list.eval(pl.element().cast(pl.Float64, strict=False))  # Scores are usually float
                 )
                 logger.info(f"Processed '{score_list_col}' into 'internal_score_pred_list'.")
             else:
                 logger.warning(f"Predicted score list column '{score_list_col}' configured but not found. Skipping.")
                 df = df.with_columns(internal_score_pred_list=pl.lit(None, dtype=pl.List(pl.Float64)))
-
 
         # Process item_id_gt_list
         gt_list_col = mapping.item_id_gt_list
@@ -422,7 +745,7 @@ class DataLoader:
             df = df.with_columns(
                 internal_item_id_gt_list=pl.col(gt_list_col)
                 .str.split(list_delimiter)
-                # .list.eval(pl.element().cast(pl.Int64, strict=False)) # Optional: if IDs are numeric
+                # .list.eval(pl.element().cast(pl.Int64, strict=False))  # Optional: if IDs are numeric
             )
             logger.info(f"Processed '{gt_list_col}' into 'internal_item_id_gt_list'.")
         else:
@@ -442,7 +765,7 @@ if __name__ == "__main__":
 2,img1.jpg,imgs/img1.jpg,11,21,5,37,0,0.92,102,102,50,50,cat,0.93,dog,0.82
 """
     dummy_csv_path = Path("dummy_data_loader_test.csv")
-    with open(dummy_csv_path, 'w') as f:
+    with open(dummy_csv_path, "w") as f:
         f.write(dummy_csv_content)
 
     # Test Detection
@@ -471,7 +794,7 @@ evaluation_params:
 report_settings: {}
 """
     dummy_det_config_path = Path("dummy_config_loader_det_test.yaml")
-    with open(dummy_det_config_path, 'w') as f:
+    with open(dummy_det_config_path, "w") as f:
         f.write(dummy_det_config_content)
 
     try:
@@ -489,7 +812,8 @@ report_settings: {}
     except Exception as e:
         logger.error(f"Error during Detection DataLoader test: {e}", exc_info=True)
     finally:
-        if dummy_det_config_path.exists(): dummy_det_config_path.unlink()
+        if dummy_det_config_path.exists():
+            dummy_det_config_path.unlink()
 
     # Test Classification
     dummy_cls_config_content = """
@@ -507,15 +831,15 @@ data_loader:
     post_time_ms: "t_post"
     total_time_ms: "t_total"
     classification:
-      top_k_id_pattern: "class_top_{k}_id"
-      top_k_score_pattern: "class_top_{k}_score"
+      top_k_id_pattern: "pred_label_top{k}"
+      top_k_score_pattern: "pred_score_top{k}"
 evaluation_params:
   classification:
     top_k: [1, 3]
 report_settings: {}
 """
     dummy_cls_config_path = Path("dummy_config_loader_cls_test.yaml")
-    with open(dummy_cls_config_path, 'w') as f:
+    with open(dummy_cls_config_path, "w") as f:
         f.write(dummy_cls_config_content)
 
     try:
@@ -536,6 +860,8 @@ report_settings: {}
     except Exception as e:
         logger.error(f"Error during Classification DataLoader test: {e}", exc_info=True)
     finally:
-        if dummy_cls_config_path.exists(): dummy_cls_config_path.unlink()
-        if dummy_csv_path.exists(): dummy_csv_path.unlink() # Clean up CSV at the end
+        if dummy_cls_config_path.exists():
+            dummy_cls_config_path.unlink()
+        if dummy_csv_path.exists():
+            dummy_csv_path.unlink()  # Clean up CSV at the end
 ```

@@ -56,8 +56,8 @@ def dummy_classification_config_path(test_data_dir: Path) -> Path:
                 "pre_time_ms": "t_pre", "inference_time_ms": "t_inf",
                 "post_time_ms": "t_post", "total_time_ms": "t_total",
                 "classification": {
-                    "top_k_id_pattern": "label_k{k}",
-                    "top_k_score_pattern": "score_k{k}"
+                    "top_k_id_pattern": "pred_label_top{k}",
+                    "top_k_score_pattern": "pred_score_top{k}"
                 }
             }
         },
