@@ -1,0 +1,38 @@
+project_info:
+  project_name: "Sample Pose Estimation Model Evaluation"
+  model_type: "pose"
+  run_id: "pose_example_run"
+
+data_loader:
+  image_base_dir: "../sample_images/"
+  field_mapping:
+    loop: "iteration"
+    image_id: "image_tag"
+    image_path: "image_location"
+    total_time_ms: "pose_latency"
+    pose:
+      person_bbox: ["px", "py", "pw", "ph"] # xywh
+      person_score: "person_det_score"
+      keypoints: "coco_keypoints_str" # e.g., "x1,y1,c1;x2,y2,c2;..."
+
+evaluation_params:
+  performance:
+    target_latency_ms: 200.0
+  pose:
+    oks_sigma: 0.5 # COCO default sigmas are per-keypoint, this is a global fallback if not list
+    keypoint_layout: "coco_17" # Tool supports "coco_17"
+    match_iou_threshold: 0.5
+    scoring_weights: {oks_consistency: 0.6, kpt_visibility: 0.2, kpt_drift: 0.2}
+  overall_scoring_weights:
+    performance: 0.4
+    stability: 0.6
+
+report_settings:
+  output_dir: "./reports_pose_example"
+  formats: ["html"]
+  display_images:
+    enabled: true
+    max_per_category: 1
+    draw_annotations: true # Will attempt to draw skeletons if implemented
+  ai_insights: {enabled: false}
+```

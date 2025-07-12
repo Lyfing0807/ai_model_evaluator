@@ -1,0 +1,11 @@
+loop_num,image_identifier,path_to_image,inference_duration_ms,predicted_label_top_1,confidence_top_1,predicted_label_top_2,confidence_top_2
+1,img_A.jpg,classification/img_A.jpg,25,cat,0.92,dog,0.05
+1,img_B.jpg,classification/img_B.jpg,28,dog,0.85,cat,0.10
+1,img_C.jpg,classification/img_C.jpg,22,bird,0.98,plane,0.01
+2,img_A.jpg,classification/img_A.jpg,26,cat,0.90,dog,0.06
+2,img_B.jpg,classification/img_B.jpg,29,cat,0.70,dog,0.20
+2,img_C.jpg,classification/img_C.jpg,23,bird,0.97,plane,0.02
+3,img_A.jpg,classification/img_A.jpg,25,dog,0.80,cat,0.15
+3,img_B.jpg,classification/img_B.jpg,28,dog,0.82,cat,0.12
+3,img_C.jpg,classification/img_C.jpg,22,plane,0.50,bird,0.45
+```

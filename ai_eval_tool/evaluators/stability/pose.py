@@ -283,38 +283,143 @@ class PoseStabilityEvaluator(StabilityEvaluatorBase):
             avg_pose_kps[:, 2] = mean_kpt_visibility # Use mean visibility as confidence of avg pose keypoint
 
             oks_scores = []
-            for i in range(kps_tensor.shape[0]): # For each frame the person is present
-                current_kps_frame = kps_tensor[i,:,:]
-                current_bbox_area = person_bbox_areas_np[i]
-                if np.isnan(current_bbox_area) or current_bbox_area < 1e-6: continue # Skip if no valid scale
+            if not np.all(np.isnan(avg_pose_kps)): # Check if avg_pose could be computed
+                for i in range(kps_tensor.shape[0]): # For each frame the person is present
+                    current_kps_frame = kps_tensor[i,:,:]
+                    current_bbox_area = person_bbox_areas_np[i]
+                    if np.isnan(current_bbox_area) or current_bbox_area < 1e-6: continue
 
-                oks = self._calculate_oks(current_kps_frame, avg_pose_kps, current_bbox_area, self.eval_params.oks_sigma)
-                oks_scores.append(oks)
+                    oks = self._calculate_oks(current_kps_frame, avg_pose_kps, current_bbox_area, self.eval_params.oks_sigma)
+                    oks_scores.append(oks)
             mean_oks_consistency = np.mean(oks_scores) if oks_scores else None
+
+            # 4. Limb/Bone Stability
+            bone_length_stds: Dict[str, Optional[float]] = {}
+            bone_angle_stds: Dict[str, Optional[float]] = {}
+
+            for kp_idx1, kp_idx2 in self.skeleton_indices:
+                bone_name = f"{self.keypoint_names[kp_idx1]}_to_{self.keypoint_names[kp_idx2]}"
+
+                lengths_this_bone = []
+                angles_this_bone = []
+
+                for frame_idx in range(kps_tensor.shape[0]):
+                    p1 = kps_tensor[frame_idx, kp_idx1, :2] # x,y of keypoint 1
+                    c1 = kps_tensor[frame_idx, kp_idx1, 2]  # confidence of keypoint 1
+                    p2 = kps_tensor[frame_idx, kp_idx2, :2] # x,y of keypoint 2
+                    c2 = kps_tensor[frame_idx, kp_idx2, 2]  # confidence of keypoint 2
+
+                    if c1 > vis_thresh and c2 > vis_thresh and not (np.any(np.isnan(p1)) or np.any(np.isnan(p2))):
+                        # Length
+                        lengths_this_bone.append(np.linalg.norm(p1 - p2))
+                        # Angle (relative to horizontal positive x-axis)
+                        angle_rad = math.atan2(p2[1] - p1[1], p2[0] - p1[0])
+                        angles_this_bone.append(math.degrees(angle_rad))
+
+                if len(lengths_this_bone) > 1:
+                    bone_length_stds[bone_name] = np.std(lengths_this_bone)
+                else:
+                    bone_length_stds[bone_name] = 0.0 if len(lengths_this_bone) == 1 else None
+
+                if len(angles_this_bone) > 1:
+                    # Angle std dev needs care for circular quantities (e.g. 1 deg and 359 deg)
+                    # For simplicity, use np.std for now; more robust circular std might be needed.
+                    bone_angle_stds[bone_name] = np.std(np.unwrap(np.deg2rad(angles_this_bone))) # unwrap for continuity
+                    bone_angle_stds[bone_name] = math.degrees(bone_angle_stds[bone_name]) if bone_angle_stds[bone_name] is not None else None
+
+                else:
+                    bone_angle_stds[bone_name] = 0.0 if len(angles_this_bone) == 1 else None
+
+            # Aggregate bone stabilities (e.g., mean std across all bones)
+            mean_bone_length_std = np.nanmean([s for s in bone_length_stds.values() if s is not None]) if bone_length_stds else None
+            mean_bone_angle_std = np.nanmean([s for s in bone_angle_stds.values() if s is not None]) if bone_angle_stds else None
+
 
             all_person_stability_metrics.append({
                 "image_id": img_id, "tracked_person_id": person_trk_id,
                 "person_appearance_consistency": person_app_cons,
-                "mean_keypoint_visibility": avg_visibility_all_kpts,
-                "mean_keypoint_position_drift_px": avg_drift_all_kpts,
+                "mean_keypoint_visibility": avg_visibility_all_kpts if not np.isnan(avg_visibility_all_kpts) else None,
+                "mean_keypoint_position_drift_px": avg_drift_all_kpts if not np.isnan(avg_drift_all_kpts) else None,
                 "mean_oks_consistency_with_avg_pose": mean_oks_consistency,
+                "mean_bone_length_std": mean_bone_length_std if (mean_bone_length_std is not None and not np.isnan(mean_bone_length_std)) else None,
+                "mean_bone_angle_std_deg": mean_bone_angle_std if (mean_bone_angle_std is not None and not np.isnan(mean_bone_angle_std)) else None,
                 "num_loops_person_appeared": n_loops_person
             })
 
         if not all_person_stability_metrics: return EvaluationResult(metrics={"warning":"No Pose person metrics."})
         stats_df = pl.DataFrame(all_person_stability_metrics)
 
+        cols_to_average = [
+            "person_appearance_consistency", "mean_keypoint_visibility",
+            "mean_keypoint_position_drift_px", "mean_oks_consistency_with_avg_pose",
+            "mean_bone_length_std", "mean_bone_angle_std_deg"
+        ]
         final_metrics = {
-            f"pos_stab_mean_{col}": stats_df[col].mean() for col in
-            ["person_appearance_consistency", "mean_keypoint_visibility",
-             "mean_keypoint_position_drift_px", "mean_oks_consistency_with_avg_pose"]
-            if stats_df[col].drop_nulls().len() > 0
+            f"pos_stab_mean_{col}": stats_df[col].mean() for col in cols_to_average
+            if col in stats_df.columns and stats_df[col].drop_nulls().len() > 0
         }
         final_metrics["pos_stab_num_total_tracked_persons"] = float(len(stats_df))
         final_metrics["pos_stab_num_persons_tracked_multi_loop"] = float(stats_df.filter(pl.col("num_loops_person_appeared") > 1).shape[0])
 
         cleaned = {k: (None if isinstance(v, float) and (np.isnan(v) or np.isinf(v)) else v) for k,v in final_metrics.items()}
+
+        self._calculate_stability_score(cleaned, stats_df)
+
         return EvaluationResult(metrics=cleaned, extra_data={"pose_stability_details_df": stats_df})
+
+    def _calculate_stability_score(self, metrics: Dict[str, Any], details_df: pl.DataFrame):
+        """Calculates overall pose stability score."""
+        if not self.eval_params or not self.eval_params.scoring_weights:
+            logger.warning("Pose stability scoring weights not configured. Skipping score calculation.")
+            return
+
+        weights = self.eval_params.scoring_weights
+
+        # OKS Consistency Score (higher is better, 0-1 range)
+        score_oks_consistency = normalize_metric_to_score(
+            metrics.get("pos_stab_mean_oks_consistency_with_avg_pose"),
+            is_0_1_rate_lower_better=False
+        )
+        if score_oks_consistency is None: score_oks_consistency = 0.0
+
+        # Keypoint Visibility Score (higher is better, 0-1 range)
+        score_kpt_visibility = normalize_metric_to_score(
+            metrics.get("pos_stab_mean_keypoint_visibility"),
+            is_0_1_rate_lower_better=False
+        )
+        if score_kpt_visibility is None: score_kpt_visibility = 0.0
+
+        # Keypoint Drift Score (lower is better, need good/bad thresholds)
+        # Example: good_drift = 2 pixels, bad_drift = 10 pixels
+        score_kpt_drift = normalize_metric_to_score(
+            metrics.get("pos_stab_mean_keypoint_position_drift_px"),
+            good_threshold=2.0, # pixels
+            bad_threshold=10.0, # pixels
+            lower_is_better=True
+        )
+        if score_kpt_drift is None: score_kpt_drift = 0.0
+
+        # Bone stability scores could also be added if metrics like mean_bone_length_std are deemed reliable enough
+        # For now, focusing on OKS, visibility, and drift as per default config weights.
+
+        s_stability_pose = (
+            score_oks_consistency * weights.get("oks_consistency", 0.0) +
+            score_kpt_visibility * weights.get("kpt_visibility", 0.0) +
+            score_kpt_drift * weights.get("kpt_drift", 0.0)
+        )
+
+        current_weights_sum = sum(weights.get(k,0.0) for k in ["oks_consistency", "kpt_visibility", "kpt_drift"])
+        if current_weights_sum > 1e-6 and abs(current_weights_sum - 1.0) > 1e-6:
+            logger.warning(f"Pose stability weights used ({ {k:weights.get(k) for k in ['oks_consistency', 'kpt_visibility', 'kpt_drift']} }) do not sum to 1. Normalizing score based on used weights.")
+            s_stability_pose = s_stability_pose / current_weights_sum if current_weights_sum > 1e-9 else 0.0
+
+        s_stability_pose = max(0.0, min(100.0, s_stability_pose))
+
+        metrics["pos_stab_score_oks_consistency"] = score_oks_consistency
+        metrics["pos_stab_score_kpt_visibility"] = score_kpt_visibility
+        metrics["pos_stab_score_kpt_drift"] = score_kpt_drift
+        metrics["pos_stab_score_overall"] = s_stability_pose # This is S_stability for pose
+        logger.info(f"Pose Stability Scores: OKS={score_oks_consistency:.2f}, KptVis={score_kpt_visibility:.2f}, KptDrift={score_kpt_drift:.2f}, Overall={s_stability_pose:.2f}")
 
 StabilityEvaluatorFactory.register_evaluator("pose", PoseStabilityEvaluator)
 
@@ -359,6 +464,8 @@ report_settings: {output_dir: "./test_pose_stab_output"}
     assert results.metrics.get("pos_stab_num_total_tracked_persons") == 2.0
     assert results.metrics.get("pos_stab_mean_keypoint_visibility") is not None
     assert results.metrics.get("pos_stab_mean_oks_consistency_with_avg_pose") is not None
+    assert "pos_stab_score_overall" in results.metrics
+    assert results.metrics["pos_stab_score_overall"] >= 0 and results.metrics["pos_stab_score_overall"] <= 100
 
     if dummy_path.exists(): dummy_path.unlink()
     import shutil

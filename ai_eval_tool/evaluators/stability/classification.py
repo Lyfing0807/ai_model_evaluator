@@ -219,12 +219,60 @@ class ClassificationStabilityEvaluator(StabilityEvaluatorBase):
 
         final_metrics_cleaned = {k: (None if isinstance(v, float) and (np.isnan(v) or np.isinf(v)) else v) for k, v in final_metrics.items()}
 
+        self._calculate_stability_score(final_metrics_cleaned, stability_stats_df)
+
         logger.info("Classification stability evaluation completed.")
         return EvaluationResult(
             metrics=final_metrics_cleaned,
             plots={},
             extra_data={"classification_stability_details_df": stability_stats_df}
         )
+
+    def _calculate_stability_score(self, metrics: Dict[str, Any], details_df: pl.DataFrame):
+        """Calculates overall classification stability score."""
+        if not self.eval_params or not self.eval_params.scoring_weights:
+            logger.warning("Classification stability scoring weights not configured. Skipping score calculation.")
+            return
+
+        weights = self.eval_params.scoring_weights
+
+        # Sub-score for Prediction Consistency (e.g., Top-1 Consistency Rate)
+        # Higher is better (0-1 range).
+        score_pred_consistency = normalize_metric_to_score(
+            metrics.get("cls_stab_mean_top_1_consistency_rate"),
+            is_0_1_rate_lower_better=False
+        )
+        if score_pred_consistency is None: score_pred_consistency = 0.0
+        # Could also incorporate Jaccard scores here if desired, with more weights.
+
+        # Sub-score for Confidence Reliability/Stability (e.g., mean Top-1 Confidence Std Dev)
+        # Lower std dev is better. Define good/bad thresholds.
+        # Example: good_conf_std = 0.05, bad_conf_std = 0.2
+        score_conf_reliability = normalize_metric_to_score(
+            metrics.get("cls_stab_mean_top_1_confidence_std"),
+            good_threshold=0.05, # Example good value for std dev of confidence
+            bad_threshold=0.2,   # Example bad value
+            lower_is_better=True
+        )
+        if score_conf_reliability is None: score_conf_reliability = 0.0
+        # ECE would be another metric for confidence reliability if available.
+
+        s_stability_classification = (
+            score_pred_consistency * weights.get("prediction_consistency", 0.0) +
+            score_conf_reliability * weights.get("confidence_reliability", 0.0)
+        )
+
+        total_weight = sum(weights.get(k,0.0) for k in ["prediction_consistency", "confidence_reliability"])
+        if total_weight > 1e-6 and abs(total_weight - 1.0) > 1e-6:
+            logger.warning(f"Classification stability weights ({weights}) do not sum to 1. Normalizing score.")
+            s_stability_classification = s_stability_classification / total_weight
+        s_stability_classification = max(0.0, min(100.0, s_stability_classification))
+
+        metrics["cls_stab_score_prediction_consistency"] = score_pred_consistency
+        metrics["cls_stab_score_confidence_reliability"] = score_conf_reliability
+        metrics["cls_stab_score_overall"] = s_stability_classification # This is S_stability for classification
+        logger.info(f"Classification Stability Scores: PredictionCons={score_pred_consistency:.2f}, ConfidenceRel={score_conf_reliability:.2f}, Overall={s_stability_classification:.2f}")
+
 
 StabilityEvaluatorFactory.register_evaluator("classification", ClassificationStabilityEvaluator)
 
@@ -327,10 +375,10 @@ report_settings: {output_dir: "./test_cls_stab_output"}
     # This is for `cls_stab_mean_jaccard_top_1` and `cls_stab_mean_jaccard_top_3` due to current Jaccard impl.
     assert "cls_stab_mean_jaccard_top_1" in results.metrics # Check if key exists
     assert "cls_stab_mean_jaccard_top_3" in results.metrics
-    # Actual value would be (( (1/3) + 1.0 ) / 2 + 1.0 ) / 2 = (0.66666 + 1.0) / 2 = 0.83333
-    # This is for the current Jaccard interpretation.
-    # print(f"Jaccard for K=1: {results.metrics['cls_stab_mean_jaccard_top_1']}")
     assert abs(results.metrics['cls_stab_mean_jaccard_top_1'] - (((1/3)+1.0)/2 + 1.0)/2) < 1e-3
+
+    assert "cls_stab_score_overall" in results.metrics
+    assert results.metrics["cls_stab_score_overall"] >= 0 and results.metrics["cls_stab_score_overall"] <= 100
 
 
     logger.info("ClassificationStabilityEvaluator test completed.")

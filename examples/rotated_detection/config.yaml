@@ -1,0 +1,36 @@
+project_info:
+  project_name: "Sample Rotated Detection Model Evaluation"
+  model_type: "rotated_detection"
+  run_id: "rdet_example_run"
+
+data_loader:
+  image_base_dir: "../sample_images/"
+  field_mapping:
+    loop: "eval_loop"
+    image_id: "source_image_id"
+    image_path: "image_file_path"
+    total_time_ms: "processing_time"
+    rotated_detection:
+      category_id: "obj_class"
+      score: "obj_score"
+      rbbox: ["cx", "cy", "width", "height", "angle_deg"] # cx,cy,w,h,angle
+
+evaluation_params:
+  performance:
+    target_latency_ms: 150.0
+  rotated_detection:
+    riou_threshold: 0.4 # Using Shapely based RIoU
+    scoring_weights: {riou_consistency: 0.5, angle_stability: 0.3, existence_stability: 0.2}
+  overall_scoring_weights:
+    performance: 0.4
+    stability: 0.6
+
+report_settings:
+  output_dir: "./reports_rdet_example"
+  formats: ["html"]
+  display_images:
+    enabled: true
+    max_per_category: 2
+    draw_annotations: true # Will attempt to draw rotated bboxes if implemented fully
+  ai_insights: {enabled: false}
+```

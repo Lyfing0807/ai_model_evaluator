@@ -47,6 +47,10 @@ class DataLoader:
             df = self._process_rotated_detection_fields(df)
         elif self.model_type == "pose":
             df = self._process_pose_fields(df)
+        elif self.model_type == "tracking":
+            df = self._process_tracking_fields(df)
+        elif self.model_type == "ranking":
+            df = self._process_ranking_fields(df)
 
         logger.info(f"Data loaded successfully. Shape: {df.shape}")
         logger.debug(f"DataFrame schema after loading:\n{df.schema}")
@@ -265,10 +269,166 @@ class DataLoader:
         # For now, store as Object type, evaluators will handle it.
         df = df.with_columns(
             internal_keypoints=pl.col(kp_col_name).apply(
-                parse_keypoints_string, return_dtype=pl.Object
+                parse_keypoints_string, return_dtype=pl.Object # type: ignore
             )
         )
         logger.info(f"Parsed keypoints string column '{kp_col_name}' into 'internal_keypoints'.")
+        return df
+
+    def _process_tracking_fields(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Processes fields specific to tracking models."""
+        if not self.data_loader_config.field_mapping.tracking:
+            logger.warning("Tracking field mapping not found, skipping tracking field processing.")
+            return df
+
+        mapping = self.data_loader_config.field_mapping.tracking
+        eval_params = self.main_config.evaluation_params.tracking
+        if not eval_params:
+            logger.error("Tracking evaluation parameters missing, cannot process bbox formats for tracking.")
+            raise ValueError("Tracking evaluation parameters missing for bbox processing.")
+
+        # Rename common tracking fields (object_id_pred, category_id_pred, score_pred)
+        rename_dict: Dict[str,str] = {}
+        if mapping.object_id_pred in df.columns and mapping.object_id_pred != "object_id_pred":
+            rename_dict[mapping.object_id_pred] = "object_id_pred"
+        if mapping.category_id_pred and mapping.category_id_pred in df.columns and mapping.category_id_pred != "category_id_pred":
+            rename_dict[mapping.category_id_pred] = "category_id_pred"
+        if mapping.score_pred and mapping.score_pred in df.columns and mapping.score_pred != "score_pred":
+            rename_dict[mapping.score_pred] = "score_pred"
+
+        # Rename GT fields if present
+        if mapping.object_id_gt and mapping.object_id_gt in df.columns and mapping.object_id_gt != "object_id_gt":
+            rename_dict[mapping.object_id_gt] = "object_id_gt"
+        if mapping.category_id_gt and mapping.category_id_gt in df.columns and mapping.category_id_gt != "category_id_gt":
+            rename_dict[mapping.category_id_gt] = "category_id_gt"
+        if mapping.visibility_gt and mapping.visibility_gt in df.columns and mapping.visibility_gt != "visibility_gt":
+            rename_dict[mapping.visibility_gt] = "visibility_gt"
+        if mapping.ignored_gt and mapping.ignored_gt in df.columns and mapping.ignored_gt != "ignored_gt":
+            rename_dict[mapping.ignored_gt] = "ignored_gt"
+
+        if rename_dict:
+            df = df.rename(rename_dict)
+
+        # Process predicted bboxes
+        bbox_pred_cols = mapping.bbox_pred
+        if not all(col in df.columns for col in bbox_pred_cols):
+            logger.error(f"One or more bbox_pred columns {bbox_pred_cols} not found.")
+            raise ValueError(f"Missing bbox_pred columns: {bbox_pred_cols}")
+        for col_name in bbox_pred_cols: # Ensure numeric
+            if not df[col_name].dtype.is_numeric():
+                 df = df.with_columns(pl.col(col_name).cast(pl.Float64, strict=False))
+
+        pred_exprs = [pl.col(c) for c in bbox_pred_cols]
+        if eval_params.bbox_pred_format == "xywh":
+            x_c, y_c, w, h = pred_exprs
+            df = df.with_columns(internal_bbox_pred=pl.concat_list([x_c - w / 2, y_c - h / 2, x_c + w / 2, y_c + h / 2]))
+        elif eval_params.bbox_pred_format == "xyxy":
+            df = df.with_columns(internal_bbox_pred=pl.concat_list(pred_exprs))
+        else: raise ValueError(f"Unsupported bbox_pred_format: {eval_params.bbox_pred_format}")
+        logger.info("Standardized 'bbox_pred' to 'internal_bbox_pred' (xyxy).")
+
+        # Process GT bboxes (if configured and present)
+        if mapping.bbox_gt and all(col in df.columns for col in mapping.bbox_gt):
+            bbox_gt_cols = mapping.bbox_gt
+            for col_name in bbox_gt_cols: # Ensure numeric
+                if not df[col_name].dtype.is_numeric():
+                    df = df.with_columns(pl.col(col_name).cast(pl.Float64, strict=False))
+
+            gt_exprs = [pl.col(c) for c in bbox_gt_cols]
+            gt_format = eval_params.bbox_gt_format or "xywh" # Default to xywh if not specified for GT
+            if gt_format == "xywh":
+                x_c, y_c, w, h = gt_exprs
+                df = df.with_columns(internal_bbox_gt=pl.concat_list([x_c - w / 2, y_c - h / 2, x_c + w / 2, y_c + h / 2]))
+            elif gt_format == "xyxy":
+                df = df.with_columns(internal_bbox_gt=pl.concat_list(gt_exprs))
+            else: raise ValueError(f"Unsupported bbox_gt_format: {gt_format}")
+            logger.info("Standardized 'bbox_gt' to 'internal_bbox_gt' (xyxy).")
+        elif mapping.bbox_gt: # Configured but not all columns present
+            logger.warning(f"bbox_gt columns {mapping.bbox_gt} configured but not all found in DataFrame. Skipping GT bbox processing.")
+            df = df.with_columns(internal_bbox_gt=pl.lit(None, dtype=pl.List(pl.Float64)))
+
+
+        # Ensure frame_id is present (renamed from common mapping if needed)
+        if "frame_id" not in df.columns:
+            logger.error("'frame_id' column (or its mapping) is required for tracking models but not found.")
+            raise ValueError("'frame_id' column is essential for tracking.")
+        # Ensure object_id_pred is present
+        if "object_id_pred" not in df.columns:
+            logger.error("'object_id_pred' column (or its mapping) is required for tracking models but not found.")
+            raise ValueError("'object_id_pred' column is essential for tracking.")
+        # Ensure query_id is present for ranking models (if common field mapping used)
+        if self.model_type == "ranking" and "query_id" not in df.columns:
+            logger.error("'query_id' column (or its mapping) is required for ranking models but not found.")
+            raise ValueError("'query_id' column is essential for ranking.")
+
+
+        return df
+
+    def _process_ranking_fields(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Processes fields specific to ranking/recommendation models."""
+        if not self.data_loader_config.field_mapping.ranking:
+            logger.warning("Ranking field mapping not found, skipping ranking field processing.")
+            return df
+
+        mapping = self.data_loader_config.field_mapping.ranking
+        # eval_params = self.main_config.evaluation_params.ranking # For k_values, not needed for loading
+
+        # Common fields like query_id, loop_id should be handled by _rename_common_columns
+        # Ensure query_id is present
+        if "query_id" not in df.columns: # Check for the standardized name
+            # Check if original name from mapping exists, if so it means renaming failed or wasn't applied yet.
+            # This check should ideally be after all renaming.
+            # For now, assume common renaming has run.
+            logger.error(f"'query_id' column (mapped from '{self.data_loader_config.field_mapping.query_id}') not found after common renaming.")
+            raise ValueError("Standardized 'query_id' column not found for ranking model.")
+
+
+        list_delimiter = mapping.list_delimiter
+
+        # Process item_id_pred_list
+        pred_list_col = mapping.item_id_pred_list
+        if pred_list_col in df.columns:
+            # Convert comma-separated string to list of strings/ints
+            # Assuming item IDs can be strings or ints. If always int, can cast later.
+            # Polars str.split returns a list of strings.
+            df = df.with_columns(
+                internal_item_id_pred_list=pl.col(pred_list_col)
+                .str.split(list_delimiter)
+                # .list.eval(pl.element().cast(pl.Int64, strict=False)) # Optional: if IDs are numeric
+            )
+            logger.info(f"Processed '{pred_list_col}' into 'internal_item_id_pred_list'.")
+        else:
+            logger.error(f"Predicted item list column '{pred_list_col}' not found.")
+            raise ValueError(f"Missing predicted item list column: {pred_list_col}")
+
+        # Process score_pred_list (optional)
+        score_list_col = mapping.score_pred_list
+        if score_list_col:
+            if score_list_col in df.columns:
+                df = df.with_columns(
+                    internal_score_pred_list=pl.col(score_list_col)
+                    .str.split(list_delimiter)
+                    .list.eval(pl.element().cast(pl.Float64, strict=False)) # Scores are usually float
+                )
+                logger.info(f"Processed '{score_list_col}' into 'internal_score_pred_list'.")
+            else:
+                logger.warning(f"Predicted score list column '{score_list_col}' configured but not found. Skipping.")
+                df = df.with_columns(internal_score_pred_list=pl.lit(None, dtype=pl.List(pl.Float64)))
+
+
+        # Process item_id_gt_list
+        gt_list_col = mapping.item_id_gt_list
+        if gt_list_col in df.columns:
+            df = df.with_columns(
+                internal_item_id_gt_list=pl.col(gt_list_col)
+                .str.split(list_delimiter)
+                # .list.eval(pl.element().cast(pl.Int64, strict=False)) # Optional: if IDs are numeric
+            )
+            logger.info(f"Processed '{gt_list_col}' into 'internal_item_id_gt_list'.")
+        else:
+            logger.error(f"Ground truth item list column '{gt_list_col}' not found.")
+            raise ValueError(f"Missing ground truth item list column: {gt_list_col}")
+
         return df
 
 

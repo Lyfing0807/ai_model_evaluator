@@ -3,101 +3,133 @@
 
 # 1. Basic Information
 project_info:
-  project_name: "Example Object Detection Model Evaluation"
-  run_id: "" # Optional: e.g., "20240715-1030-commit-abc123". If empty, a timestamp will be used.
-  model_version: "v1.0.0-alpha"
-  model_type: "detection"  # Supported: detection, classification, rotated_detection, pose
+  project_name: "Example AI Model Evaluation Run"
+  # run_id: "custom_run_id_001" # Optional: If empty, a timestamp-based ID will be generated.
+  model_version: "v1.2.3-exp"
+  model_type: "detection"  # Supported: detection, classification, rotated_detection, pose, tracking, ranking
 
 # 2. Data Loader Configuration
 data_loader:
   # Base directory for resolving relative image_path in CSV.
-  # For HTML reports to display images, these paths must be accessible.
-  image_base_dir: "/mnt/data/my_image_dataset/" # Example: "/path/to/user/image_dataset/"
+  # For HTML reports to display images, these paths must be accessible from where the report is viewed,
+  # or images must be copied into the report structure (current behavior for abnormal samples).
+  image_base_dir: "/path/to/your/image_dataset_root/" # Example: "/mnt/data/my_images/"
 
   field_mapping:
-    # Common fields expected for all model types (for performance evaluation)
+    # --- Common fields expected for all model types ---
     # These are the names of the columns in your CSV file.
-    loop: "轮次ID"             # Column name for loop/run ID
-    image_id: "图片名"         # Column name for unique image identifier
-    image_path: "图片路径"     # Column name for relative or absolute path to the image
-    pre_time_ms: "前处理时间"
-    inference_time_ms: "推理时间"
-    post_time_ms: "后处理时间"
-    total_time_ms: "总耗时" # Can be "前+推理+后处理时间" or a dedicated column for total time
+    loop: "loop_id"             # Column name for loop/run ID (for stability over multiple runs)
+    image_id: "image_name"      # Column name for unique image identifier (can be frame for sequence)
+    image_path: "relative_image_path" # Column for relative path to the image (used for display)
+    frame_id: "frame_number"    # Explicitly for sequence-based models like tracking (can be same as image_id)
+    query_id: "user_query_token"# For ranking/recommendation models
 
-    # Model-specific field mappings
+    # Performance timing fields (optional, but needed for performance evaluation)
+    pre_time_ms: "preprocessing_ms"
+    inference_time_ms: "inference_ms"
+    post_time_ms: "postprocessing_ms"
+    total_time_ms: "total_latency_ms"
+
+    # --- Model-specific field mappings ---
     detection:
-      category_id: "种类（标签）" # Column name for detected object's category/class ID
-      score: "置信度"           # Column name for detection confidence score
-      # Bounding box fields. Provide the list of column names from your CSV.
-      # The order matters if bbox_format is 'xyxy' or 'xywh' (center_x, center_y, width, height).
-      bbox: ["bbox_x", "bbox_y", "bbox_width", "bbox_height"] # Example for xywh
-      # bbox: ["x_min", "y_min", "x_max", "y_max"] # Example for xyxy
+      category_id: "detected_class_id"
+      score: "confidence_score"
+      bbox: ["box_x_center", "box_y_center", "box_width", "box_height"] # Example for xywh
+      # bbox: ["min_x", "min_y", "max_x", "max_y"] # Example for xyxy
 
     classification:
       # For classification, Top-K fields are defined by patterns.
-      # '{k}' will be replaced by the actual K values from evaluation_params.classification.top_k
-      top_k_id_pattern: "top{k}_label_id"     # e.g., top1_label_id, top3_label_id
-      top_k_score_pattern: "top{k}_score" # e.g., top1_score, top3_score
+      # '{k}' will be replaced by actual K values from evaluation_params.classification.top_k
+      top_k_id_pattern: "pred_label_top{k}"     # e.g., pred_label_top1, pred_label_top3
+      top_k_score_pattern: "pred_score_top{k}" # e.g., pred_score_top1, pred_score_top3
 
     rotated_detection:
-      category_id: "category"
-      score: "score"
+      category_id: "rdet_category"
+      score: "rdet_confidence"
       # rbbox: [center_x, center_y, width, height, angle_degrees]
-      rbbox: ["cx", "cy", "w", "h", "angle"]
+      rbbox: ["rbbox_cx", "rbbox_cy", "rbbox_w", "rbbox_h", "rbbox_angle"]
 
     pose:
-      person_bbox: ["person_x", "person_y", "person_w", "person_h"] # Bbox for the detected person
-      person_score: "person_confidence"
-      # Keypoints string, e.g., "x1,y1,c1;x2,y2,c2;..."
-      # The parser will split by ';' then by ','
-      keypoints: "keypoints_str"
+      person_bbox: ["person_box_x", "person_box_y", "person_box_w", "person_box_h"] # Bbox for detected person (xywh)
+      person_score: "person_conf"
+      # Keypoints string, e.g., "x1,y1,c1;x2,y2,c2;..." (parser splits by ';' then by ',')
+      keypoints: "keypoints_coco_format_str"
 
+    tracking:
+      # Predicted object fields
+      object_id_pred: "predicted_track_id"
+      bbox_pred: ["pred_x", "pred_y", "pred_w", "pred_h"] # xywh
+      category_id_pred: "pred_category"
+      score_pred: "pred_track_score"
+      # Ground truth object fields (optional, but needed for MOTA/MOTP)
+      object_id_gt: "gt_track_id"
+      bbox_gt: ["gt_x", "gt_y", "gt_w", "gt_h"] # xywh
+      category_id_gt: "gt_category"
+      visibility_gt: "gt_visibility" # e.g. [0,1]
+      ignored_gt: "gt_ignored_flag"  # e.g. boolean/int
 
-# 3. Evaluation Parameters (model-specific sections)
+    ranking:
+      # query_id is in CommonFieldMapping
+      item_id_pred_list: "ranked_predicted_item_ids" # e.g., "itemA,itemB,itemC"
+      score_pred_list: "predicted_item_scores"     # e.g., "0.9,0.8,0.7"
+      item_id_gt_list: "ground_truth_relevant_items" # e.g., "itemA,itemF"
+      list_delimiter: "," # Delimiter for list-like fields above
+
+# 3. Evaluation Parameters
 evaluation_params:
-  # Common performance evaluation parameters (if any in future)
+  performance: # Parameters for the PerformanceEvaluator's scoring
+    target_latency_ms: 50.0 # Target for P95 latency (lower is better)
+    cv_target_threshold: 0.1 # Target for Coefficient of Variation of latency (lower is better)
+    component_weights: {"throughput": 0.6, "latency_stability": 0.4} # Weights for S_performance
 
   detection:
-    iou_threshold: 0.5        # IoU threshold for matching objects across runs
-    z_score_threshold: 3.0    # For outlier detection in some stability metrics (example)
-    bbox_format: "xywh"       # Bounding box format in the CSV: "xywh" (center_x, center_y, width, height) or "xyxy" (x_min, y_min, x_max, y_max)
-    # Scoring weights for an overall stability score (optional, for future use)
-    scoring_weights:
-      performance: 0.2
-      stability: 0.8
+    iou_threshold: 0.5
+    bbox_format: "xywh" # Format of 'bbox' field in CSV for detection
+    scoring_weights: {"existence_stability": 0.3, "position_stability": 0.4, "confidence_stability": 0.15, "category_stability": 0.15}
 
   classification:
-    top_k: [1, 3, 5]          # Which Top-K values to evaluate for consistency and ECE.
-    # other_classification_param: value
+    top_k: [1, 3, 5]
+    scoring_weights: {"prediction_consistency": 0.6, "confidence_reliability": 0.4}
 
   rotated_detection:
     riou_threshold: 0.5
-    bbox_format: "xywha" # center_x, center_y, width, height, angle - for rbbox field mapping
-    # other_rotated_detection_param: value
+    scoring_weights: {"riou_consistency": 0.4, "angle_stability": 0.3, "existence_stability": 0.3}
 
   pose:
-    oks_sigma: 0.5  # Sigma value for OKS calculation (COCO default is a list, often simplified to one value)
-    keypoint_layout: "coco_17" # Defines the keypoint names and skeleton for OKS and limb analysis.
-                               # Supported: "coco_17", "mpii_16" (planned)
-    match_iou_threshold: 0.5 # IoU threshold for matching persons across runs using person_bbox
+    oks_sigma: 0.5 # Can be a single float or a list of 17 floats for COCO
+    keypoint_layout: "coco_17" # Currently "coco_17" is supported
+    match_iou_threshold: 0.5 # IoU threshold for matching persons across loops
+    scoring_weights: {"oks_consistency": 0.5, "kpt_visibility": 0.25, "kpt_drift": 0.25}
+
+  tracking:
+    mota_iou_threshold: 0.5 # IoU for matching pred tracks to GT tracks in MOTA calc
+    bbox_pred_format: "xywh" # Format of bbox_pred in CSV
+    bbox_gt_format: "xywh"   # Format of bbox_gt in CSV
+    min_track_length_for_stability: 5 # Min frames for some non-MOT stability metrics
+    scoring_weights: {"mota_stability": 0.5, "track_fragmentation": 0.25, "id_consistency": 0.25} # Example weights
+
+  ranking:
+    k_values: [5, 10, 20] # K values for NDCG@K, Recall@K etc.
+    scoring_weights: {"ndcg_stability": 0.4, "recall_stability": 0.3, "top_k_set_jaccard": 0.3}
+
+  overall_scoring_weights: # Weights to combine S_performance and S_model_stability
+    performance: 0.4
+    stability: 0.6
 
 # 4. Report Generation Configuration
 report_settings:
-  output_dir: "./reports"     # Directory where reports and artifacts will be saved
-  formats: ["md", "html"]     # Desired report formats
+  output_dir: "./ai_eval_reports" # Directory where reports and artifacts will be saved
+  formats: ["md", "html"]       # Desired report formats
 
   display_images:             # Configuration for displaying images in HTML reports
-    enabled: true             # Master switch for image display in reports
-    max_per_category: 5       # Max images to show per anomaly category (e.g., top 5 IoU drift examples)
-    # For detection/pose, draw bounding boxes/skeletons on displayed images
-    draw_annotations: true
+    enabled: true             # Master switch for image display
+    max_per_category: 5       # Max images to show per anomaly category
+    draw_annotations: true    # Draw bboxes/skeletons on displayed abnormal images (if applicable)
 
-  # Experimental AI Insights configuration
-  ai_insights:
+  ai_insights:                # Experimental AI Insights configuration
     enabled: false            # Set to true to enable AI-generated chart interpretations
-    model_name: "gpt-3.5-turbo" # LLM model to use (e.g., "gpt-4o", "claude-3-sonnet-20240229")
+    model_name: "gpt-3.5-turbo" # LLM model to use
     api_endpoint: "https://api.openai.com/v1/chat/completions" # LLM API endpoint
     # API Key should be set via environment variable (e.g., OPENAI_API_KEY), not here.
-    # cache_responses: true # Whether to cache LLM responses to avoid redundant calls (default true if enabled)
+    cache_responses: true     # Whether to cache LLM responses
 ```

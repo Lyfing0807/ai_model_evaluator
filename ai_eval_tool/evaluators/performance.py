@@ -159,8 +159,73 @@ class PerformanceEvaluator(EvaluatorBase):
         # Polars handles NaNs from operations like std on single element series as nulls, which is fine.
         # If we used numpy directly, we'd get np.nan, which might need conversion.
 
+        # --- Calculate Performance Score ---
+        self._calculate_performance_score(metrics)
+
         logger.info(f"Performance evaluation completed. Metrics calculated: {list(metrics.keys())}")
+        # Store the deduplicated df used for performance calculations for potential use in reporting
+        extra_data["deduplicated_perf_df_for_charts"] = perf_df
         return EvaluationResult(metrics=metrics, plots=plots, extra_data=extra_data)
+
+    def _calculate_performance_score(self, metrics: Dict[str, Any]):
+        """Calculates overall performance score based on sub-metrics."""
+        # Ensure self.config.evaluation_params.performance exists
+        if not hasattr(self.config.evaluation_params, 'performance') or self.config.evaluation_params.performance is None:
+            logger.warning("Performance evaluation parameters not found in config. Skipping performance score.")
+            return
+
+        params = self.config.evaluation_params.performance
+        if not params.component_weights:
+            logger.warning("Performance component_weights not configured. Skipping performance score calculation.")
+            return
+
+        weights = params.component_weights
+
+        p95_latency = metrics.get("perf_p95_total_time_ms")
+        target_latency = params.target_latency_ms # From PerformanceEvaluationParams
+
+        # Score for throughput (based on p95 latency vs target)
+        score_throughput = normalize_metric_to_score(
+            value=p95_latency,
+            target=target_latency,
+            lower_is_better=True
+        )
+        if score_throughput is None: score_throughput = 0.0
+
+        # Score for latency stability (based on CV vs target CV)
+        cv_latency = metrics.get("perf_cv_total_time_ms")
+        target_cv = params.cv_target_threshold # From PerformanceEvaluationParams
+
+        # For CV, it's a 0-1 rate, and lower is better.
+        score_latency_stability = normalize_metric_to_score(
+            value=cv_latency,
+            # target=target_cv, # Option 1: treat target_cv as an ideal target
+            # lower_is_better=True
+            # Option 2: Use good/bad thresholds based on target_cv
+            good_threshold=target_cv, # Score 100 if cv <= target_cv
+            bad_threshold=target_cv * 5 if target_cv is not None else 0.5, # e.g. CV 5x target is 0 score. Default bad CV = 0.5
+            lower_is_better=True
+            # Option 3: Directly use is_0_1_rate_lower_better if CV is guaranteed to be 0-1
+            # is_0_1_rate_lower_better=True # If CV is the value
+        )
+        if score_latency_stability is None: score_latency_stability = 0.0
+
+        s_performance = (score_throughput * weights.get("throughput", 0.0) +
+                         score_latency_stability * weights.get("latency_stability", 0.0))
+
+        # Ensure total weight is 1 if they are provided, otherwise scale.
+        total_weight = weights.get("throughput", 0.0) + weights.get("latency_stability", 0.0)
+        if total_weight > 1e-6 and abs(total_weight - 1.0) > 1e-6: # If weights provided but don't sum to 1
+            logger.warning(f"Performance component weights ({weights}) do not sum to 1. Normalizing score.")
+            s_performance = s_performance / total_weight
+        s_performance = max(0.0, min(100.0, s_performance))
+
+
+        metrics["perf_score_throughput"] = score_throughput
+        metrics["perf_score_latency_stability"] = score_latency_stability
+        metrics["perf_score_overall"] = s_performance # This is S_performance
+        logger.info(f"Performance Scores: Throughput={score_throughput:.2f}, LatencyStability={score_latency_stability:.2f}, S_Performance_Overall={s_performance:.2f}")
+
 
 if __name__ == "__main__":
     from pathlib import Path

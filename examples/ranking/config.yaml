@@ -1,0 +1,33 @@
+project_info:
+  project_name: "Sample Ranking Model Evaluation"
+  model_type: "ranking"
+  run_id: "ranking_example_run"
+
+data_loader:
+  field_mapping:
+    loop: "experiment_version"
+    query_id: "user_id" # Using user_id as the query identifier
+    # image_id and image_path are not typically used for ranking, can be omitted or set to null columns if common fields are enforced
+    ranking:
+      item_id_pred_list: "predicted_item_ids" # CSV column with comma-separated string of item IDs
+      score_pred_list: "prediction_scores"    # CSV column with comma-separated string of scores
+      item_id_gt_list: "relevant_item_ids"    # CSV column with comma-separated string of GT item IDs
+      list_delimiter: ","
+
+evaluation_params:
+  # Performance params are optional if no timing data for ranking generation itself
+  performance:
+    target_latency_ms: 500.0 # e.g. if ranking generation time is measured
+  ranking:
+    k_values: [3, 5] # Evaluate NDCG@3, Recall@3, NDCG@5, Recall@5 etc.
+    scoring_weights: {ndcg_stability: 0.5, recall_stability: 0.2, top_k_set_jaccard: 0.3}
+  overall_scoring_weights:
+    performance: 0.1 # Lower weight if performance is just list generation time
+    stability: 0.9
+
+report_settings:
+  output_dir: "./reports_ranking_example"
+  formats: ["md", "html"]
+  display_images: {enabled: false} # No images for ranking reports typically
+  ai_insights: {enabled: false}
+```

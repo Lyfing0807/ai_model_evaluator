@@ -1,0 +1,40 @@
+project_info:
+  project_name: "Sample Detection Model Evaluation"
+  model_type: "detection"
+  run_id: "detection_example_run"
+
+data_loader:
+  image_base_dir: "../sample_images/" # Assuming sample_images is one level up from example execution
+  field_mapping:
+    loop: "loop_id"
+    image_id: "image_filename"
+    image_path: "relative_image_loc"
+    total_time_ms: "latency_ms" # Only total time for simplicity in this example
+    detection:
+      category_id: "class_id"
+      score: "confidence"
+      bbox: ["x_center", "y_center", "width", "height"]
+
+evaluation_params:
+  performance:
+    target_latency_ms: 100.0
+    cv_target_threshold: 0.2
+    component_weights: {throughput: 0.7, latency_stability: 0.3}
+  detection:
+    iou_threshold: 0.5
+    bbox_format: "xywh"
+    scoring_weights: {existence_stability: 0.3, position_stability: 0.5, confidence_stability: 0.1, category_stability: 0.1}
+  overall_scoring_weights:
+    performance: 0.5
+    stability: 0.5
+
+report_settings:
+  output_dir: "./reports_detection_example" # Output relative to where this config is run
+  formats: ["md", "html"]
+  display_images:
+    enabled: true
+    max_per_category: 3
+    draw_annotations: true
+  ai_insights:
+    enabled: false
+```

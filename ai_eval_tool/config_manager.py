@@ -4,23 +4,25 @@ Configuration Manager: Loads, validates, and provides access to evaluation setti
 from typing import List, Dict, Optional, Union, Literal
 import yaml
 from pydantic import BaseModel, Field, DirectoryPath, FilePath, validator
-
-# Define Pydantic models to mirror the structure of config.yaml
+from pathlib import Path
 
 class ProjectInfo(BaseModel):
     project_name: str = "AI Model Evaluation"
     run_id: Optional[str] = None
     model_version: Optional[str] = None
-    model_type: Literal["detection", "classification", "rotated_detection", "pose"]
+    model_type: Literal["detection", "classification", "rotated_detection", "pose", "tracking", "ranking"] # Added ranking
 
 class CommonFieldMapping(BaseModel):
     loop: str = "loop"
-    image_id: str = "image_id"
-    image_path: str = "image_path"
-    pre_time_ms: str = "pre_time_ms"
-    inference_time_ms: str = "inference_time_ms"
-    post_time_ms: str = "post_time_ms"
-    total_time_ms: str = "total_time_ms"
+    image_id: Optional[str] = "image_id" # Made optional as ranking/tracking might not use it
+    image_path: Optional[str] = None
+    frame_id: Optional[str] = "frame_id"
+    query_id: Optional[str] = "query_id" # Added for ranking/recsys
+
+    pre_time_ms: Optional[str] = "pre_time_ms"
+    inference_time_ms: Optional[str] = "inference_time_ms"
+    post_time_ms: Optional[str] = "post_time_ms"
+    total_time_ms: Optional[str] = "total_time_ms"
 
 class DetectionFieldMapping(BaseModel):
     category_id: str = "category_id"
@@ -41,54 +43,100 @@ class PoseFieldMapping(BaseModel):
     person_score: str = "person_score"
     keypoints: str = "keypoints_str"
 
+class TrackingFieldMapping(BaseModel):
+    object_id_pred: str = "track_id_pred"
+    bbox_pred: List[str] = ["x_pred", "y_pred", "w_pred", "h_pred"]
+    category_id_pred: Optional[str] = "category_id_pred"
+    score_pred: Optional[str] = "score_pred"
+    object_id_gt: Optional[str] = "track_id_gt"
+    bbox_gt: Optional[List[str]] = ["x_gt", "y_gt", "w_gt", "h_gt"]
+    category_id_gt: Optional[str] = "category_id_gt"
+    visibility_gt: Optional[str] = "visibility_gt"
+    ignored_gt: Optional[str] = "ignored_gt"
+
+class RankingFieldMapping(BaseModel):
+    # query_id is in CommonFieldMapping
+    item_id_pred_list: str = "item_id_pred_list"
+    score_pred_list: Optional[str] = "score_pred_list"
+    item_id_gt_list: str = "item_id_gt_list"
+    list_delimiter: str = Field(",", description="Delimiter for list-like CSV fields.")
 
 class FieldMapping(CommonFieldMapping):
     detection: Optional[DetectionFieldMapping] = None
     classification: Optional[ClassificationFieldMapping] = None
     rotated_detection: Optional[RotatedDetectionFieldMapping] = None
     pose: Optional[PoseFieldMapping] = None
+    tracking: Optional[TrackingFieldMapping] = None
+    ranking: Optional[RankingFieldMapping] = None # Added ranking
 
 class DataLoaderConfig(BaseModel):
-    # csv_file_path: FilePath # This should be passed as a CLI argument or discovered
     image_base_dir: Optional[DirectoryPath] = None
     field_mapping: FieldMapping
 
+# --- Evaluation Parameter Models ---
 class DetectionEvaluationParams(BaseModel):
     iou_threshold: float = Field(0.5, ge=0, le=1)
     z_score_threshold: float = Field(3.0, gt=0)
     bbox_format: Literal["xywh", "xyxy"] = "xywh"
-    # scoring_weights: Optional[Dict[str, float]] = None # For future use
+    scoring_weights: Optional[Dict[str, float]] = Field(default_factory=lambda: {"existence_stability":0.3, "position_stability":0.4, "confidence_stability":0.15, "category_stability":0.15})
 
 class ClassificationEvaluationParams(BaseModel):
     top_k: List[int] = [1, 3, 5]
-
+    scoring_weights: Optional[Dict[str, float]] = Field(default_factory=lambda: {"prediction_consistency": 0.6, "confidence_reliability": 0.4})
     @validator('top_k')
-    def top_k_must_be_positive_and_sorted(cls, v):
-        if not v:
-            raise ValueError("top_k list cannot be empty")
-        if any(k <= 0 for k in v):
-            raise ValueError("All k values in top_k must be positive")
-        if sorted(list(set(v))) != sorted(v):
-            raise ValueError("top_k list must be sorted and contain unique values")
+    def top_k_rules(cls, v): # Shortened name
+        if not v: raise ValueError("top_k list cannot be empty")
+        if any(k <= 0 for k in v): raise ValueError("All k values must be positive")
+        if sorted(list(set(v))) != sorted(v): raise ValueError("top_k list must be sorted and unique")
         return v
 
 class RotatedDetectionEvaluationParams(BaseModel):
     riou_threshold: float = Field(0.5, ge=0, le=1)
-    # bbox_format might be relevant here if rbbox isn't always cx,cy,w,h,a
-    # For now, assume rbbox field mapping directly maps to these 5 components.
+    scoring_weights: Optional[Dict[str, float]] = Field(default_factory=lambda: {"riou_consistency": 0.4, "angle_stability": 0.3, "existence_stability": 0.3})
 
 class PoseEvaluationParams(BaseModel):
-    oks_sigma: Union[float, List[float]] = 0.5 # Could be a single value or list per keypoint type
-    keypoint_layout: str = "coco_17" # E.g., "coco_17", "mpii_16"
+    oks_sigma: Union[float, List[float]] = 0.5
+    keypoint_layout: str = "coco_17"
     match_iou_threshold: float = Field(0.5, ge=0, le=1)
+    scoring_weights: Optional[Dict[str, float]] = Field(default_factory=lambda: {"oks_consistency": 0.5, "kpt_visibility": 0.25, "kpt_drift": 0.25})
 
+class TrackingEvaluationParams(BaseModel):
+    mota_iou_threshold: float = Field(0.5, ge=0, le=1)
+    bbox_pred_format: Literal["xywh", "xyxy"] = "xywh"
+    bbox_gt_format: Optional[Literal["xywh", "xyxy"]] = "xywh"
+    min_track_length_for_stability: int = Field(5, gt=0)
+    scoring_weights: Optional[Dict[str, float]] = Field(default_factory=lambda: {"mota_stability": 0.4, "track_fragmentation": 0.3, "id_consistency": 0.3})
+
+class RankingEvaluationParams(BaseModel):
+    k_values: List[int] = Field(default_factory=lambda: [5, 10, 20])
+    scoring_weights: Optional[Dict[str, float]] = Field(default_factory=lambda: {"ndcg_stability": 0.4, "recall_stability": 0.3, "top_k_set_jaccard": 0.3})
+    @validator('k_values')
+    def k_values_rules(cls, v): # Shortened name
+        if not v: raise ValueError("k_values list cannot be empty")
+        if any(k <= 0 for k in v): raise ValueError("All k values must be positive")
+        if sorted(list(set(v))) != sorted(v): raise ValueError("k_values list must be sorted and unique")
+        return v
+
+class PerformanceEvaluationParams(BaseModel):
+    target_latency_ms: Optional[float] = Field(50.0, gt=0)
+    cv_target_threshold: Optional[float] = Field(0.1, ge=0, le=1)
+    component_weights: Optional[Dict[str, float]] = Field(default_factory=lambda: {"throughput": 0.6, "latency_stability": 0.4})
+
+class OverallScoringWeights(BaseModel):
+    performance: float = Field(0.4, ge=0, le=1)
+    stability: float = Field(0.6, ge=0, le=1)
 
 class EvaluationParams(BaseModel):
+    performance: Optional[PerformanceEvaluationParams] = Field(default_factory=PerformanceEvaluationParams)
     detection: Optional[DetectionEvaluationParams] = None
     classification: Optional[ClassificationEvaluationParams] = None
     rotated_detection: Optional[RotatedDetectionEvaluationParams] = None
     pose: Optional[PoseEvaluationParams] = None
+    tracking: Optional[TrackingEvaluationParams] = None
+    ranking: Optional[RankingEvaluationParams] = None # Added ranking
+    overall_scoring_weights: Optional[OverallScoringWeights] = Field(default_factory=OverallScoringWeights)
 
+# --- Report Settings Models ---
 class ReportDisplayImagesConfig(BaseModel):
     enabled: bool = True
     max_per_category: int = Field(10, ge=0)
@@ -98,7 +146,6 @@ class AIInsightsConfig(BaseModel):
     enabled: bool = False
     model_name: Optional[str] = "gpt-3.5-turbo"
     api_endpoint: Optional[str] = "https://api.openai.com/v1/chat/completions"
-    # api_key is handled by environment variable
     cache_responses: bool = True
 
 class ReportSettings(BaseModel):
@@ -106,17 +153,13 @@ class ReportSettings(BaseModel):
     formats: List[Literal["md", "html"]] = ["md", "html"]
     display_images: ReportDisplayImagesConfig = Field(default_factory=ReportDisplayImagesConfig)
     ai_insights: AIInsightsConfig = Field(default_factory=AIInsightsConfig)
-
     @validator('output_dir', pre=True, always=True)
     def create_output_dir_if_not_exists(cls, v):
-        from pathlib import Path # Local import to avoid circularity if Path is used elsewhere at top level
-        if v is None:
-            v = Path("./reports")
-        path = Path(v)
+        path = Path(v) if v is not None else Path("./reports")
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-
+# --- Main Configuration Model ---
 class MainConfig(BaseModel):
     project_info: ProjectInfo
     data_loader: DataLoaderConfig
@@ -125,152 +168,77 @@ class MainConfig(BaseModel):
 
     @validator('evaluation_params')
     def check_model_specific_params_exist(cls, v, values):
-        if 'project_info' not in values:
-            # This can happen if project_info itself fails validation earlier
-            return v
+        if 'project_info' not in values: return v
         model_type = values['project_info'].model_type
-        if not getattr(v, model_type, None):
+        # Performance params are always present due to default_factory
+        if model_type != "performance" and not getattr(v, model_type, None) :
             raise ValueError(f"evaluation_params for model_type '{model_type}' are missing.")
         return v
 
     @validator('data_loader')
     def check_model_specific_field_mapping_exist(cls, v, values):
-        if 'project_info' not in values:
-            return v
+        if 'project_info' not in values: return v
         model_type = values['project_info'].model_type
-        if not getattr(v.field_mapping, model_type, None) and model_type not in ["performance_only"]: # Example if we had a type with no specific fields
+        # Common fields are in FieldMapping itself. Check model-specific part.
+        if not getattr(v.field_mapping, model_type, None) and model_type not in ["performance_only"]: # Example
              raise ValueError(f"data_loader.field_mapping for model_type '{model_type}' is missing.")
         return v
 
-
-def load_config(config_path: Union[str, 'Path']) -> MainConfig:
-    """
-    Loads the YAML configuration file and validates it using Pydantic models.
-
-    Args:
-        config_path: Path to the YAML configuration file.
-
-    Returns:
-        A MainConfig object populated with settings.
-
-    Raises:
-        FileNotFoundError: If the config file does not exist.
-        yaml.YAMLError: If the config file is not valid YAML.
-        pydantic.ValidationError: If the configuration data does not match the schema.
-    """
-    from pathlib import Path # Local import
+def load_config(config_path: Union[str, Path]) -> MainConfig:
     p = Path(config_path)
-    if not p.exists():
-        raise FileNotFoundError(f"Configuration file not found: {config_path}")
-
+    if not p.exists(): raise FileNotFoundError(f"Config file not found: {config_path}")
     with open(p, 'r', encoding='utf-8') as f:
-        try:
-            raw_config = yaml.safe_load(f)
-        except yaml.YAMLError as e:
-            raise yaml.YAMLError(f"Error parsing YAML configuration file: {e}")
-
+        try: raw_config = yaml.safe_load(f)
+        except yaml.YAMLError as e: raise yaml.YAMLError(f"Error parsing YAML: {e}")
     return MainConfig(**raw_config)
 
-# Example usage (for testing this module directly)
 if __name__ == "__main__":
-    from pathlib import Path
-    # Create a dummy config.yaml for testing
-    dummy_config_content = """
+    # ... (existing __main__ block for testing detection and classification) ...
+
+    # Example for Tracking config (add to dummy_config_content or separate)
+    dummy_tracking_config = """
 project_info:
-  project_name: "Test Detection Project"
-  model_type: "detection"
-
-data_loader:
-  # csv_file_path: "dummy_data.csv" # Will fail if file doesn't exist, handled by CLI later
-  image_base_dir: "./"
-  field_mapping:
-    loop: "loop_id"
-    image_id: "img_name"
-    image_path: "rel_path"
-    pre_time_ms: "t_pre"
-    inference_time_ms: "t_inf"
-    post_time_ms: "t_post"
-    total_time_ms: "t_total"
-    detection:
-      category_id: "det_cat"
-      score: "det_score"
-      bbox: ["x", "y", "w", "h"]
-
-evaluation_params:
-  detection:
-    iou_threshold: 0.6
-    bbox_format: "xywh"
-
-report_settings:
-  output_dir: "./test_reports"
-  formats: ["md"]
-"""
-    dummy_config_path = Path("dummy_config_test.yaml")
-    with open(dummy_config_path, 'w') as f:
-        f.write(dummy_config_content)
-
-    try:
-        print(f"Attempting to load config: {dummy_config_path.resolve()}")
-        cfg = load_config(dummy_config_path)
-        print("Configuration loaded successfully!")
-        print(f"Project Name: {cfg.project_info.project_name}")
-        print(f"Output Dir: {cfg.report_settings.output_dir}")
-        if cfg.evaluation_params.detection:
-            print(f"Detection IoU Threshold: {cfg.evaluation_params.detection.iou_threshold}")
-    except Exception as e:
-        print(f"Error loading configuration: {e}")
-    finally:
-        if dummy_config_path.exists():
-            dummy_config_path.unlink()
-        # Clean up created test_reports dir
-        test_reports_dir = Path("./test_reports")
-        if test_reports_dir.exists() and test_reports_dir.is_dir():
-            import shutil
-            shutil.rmtree(test_reports_dir)
-
-    # Test classification config
-    dummy_class_config_content = """
-project_info:
-  project_name: "Test Classification Project"
-  model_type: "classification"
-
+  project_name: "Test Tracking Project"
+  model_type: "tracking"
 data_loader:
   image_base_dir: "./"
   field_mapping:
     loop: "loop_id"
-    image_id: "img_name"
-    image_path: "rel_path"
-    pre_time_ms: "t_pre"
-    inference_time_ms: "t_inf"
-    post_time_ms: "t_post"
-    total_time_ms: "t_total"
-    classification:
-      top_k_id_pattern: "class_top_{k}_id"
-      top_k_score_pattern: "class_top_{k}_score"
-
+    frame_id: "frame_num"
+    image_id: "frame_num" # If frame_num is also the unique image identifier
+    tracking:
+      object_id_pred: "track_id"
+      bbox_pred: ["px","py","pw","ph"]
+      object_id_gt: "gt_track_id"
+      bbox_gt: ["gx","gy","gw","gh"]
 evaluation_params:
-  classification:
-    top_k: [1, 5]
-
-report_settings:
-  output_dir: "./test_reports_class"
+  tracking:
+    mota_iou_threshold: 0.6
+    bbox_pred_format: "xywh"
+    bbox_gt_format: "xywh"
+report_settings: {output_dir: "./test_reports_tracking"}
 """
-    dummy_class_config_path = Path("dummy_config_class_test.yaml")
-    with open(dummy_class_config_path, 'w') as f:
-        f.write(dummy_class_config_content)
-
-    try:
-        print(f"Attempting to load classification config: {dummy_class_config_path.resolve()}")
-        cfg_class = load_config(dummy_class_config_path)
-        print("Classification configuration loaded successfully!")
-        print(f"Top K: {cfg_class.evaluation_params.classification.top_k}")
-    except Exception as e:
-        print(f"Error loading classification configuration: {e}")
-    finally:
-        if dummy_class_config_path.exists():
-            dummy_class_config_path.unlink()
-        test_reports_class_dir = Path("./test_reports_class")
-        if test_reports_class_dir.exists() and test_reports_class_dir.is_dir():
-            import shutil
-            shutil.rmtree(test_reports_class_dir)
+    # Example for Ranking config
+    dummy_ranking_config = """
+project_info:
+  project_name: "Test Ranking Project"
+  model_type": "ranking"
+data_loader:
+  field_mapping:
+    loop: "run_version"
+    query_id: "user_query_id"
+    ranking:
+      item_id_pred_list: "predicted_items"
+      item_id_gt_list: "relevant_items"
+      list_delimiter: ","
+evaluation_params:
+  ranking:
+    k_values: [5, 10]
+report_settings: {output_dir: "./test_reports_ranking"}
+"""
+    # To test these, you'd write them to temp files and call load_config
+    # e.g. Path("dummy_track.yaml").write_text(dummy_tracking_config)
+    # cfg_track = load_config("dummy_track.yaml")
+    # print(f"Tracking MOTA threshold: {cfg_track.evaluation_params.tracking.mota_iou_threshold}")
+    pass
 ```

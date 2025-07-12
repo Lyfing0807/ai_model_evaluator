@@ -1,0 +1,42 @@
+project_info:
+  project_name: "Sample Object Tracking Model Evaluation"
+  model_type: "tracking"
+  run_id: "tracking_example_run"
+
+data_loader:
+  # image_base_dir: "../sample_images/" # Optional for tracking if not visualizing frames
+  field_mapping:
+    loop: "run_id" # Multiple experiment runs of the same sequence
+    frame_id: "frame_num"
+    image_id: "frame_num" # Often frame_id is also the unique image identifier for tracking
+    # image_path: "frame_image_path" # Optional if displaying frames
+    total_time_ms: "frame_processing_time" # Performance per frame
+    tracking:
+      object_id_pred: "predicted_track_id"
+      bbox_pred: ["px", "py", "pw", "ph"] # xywh
+      score_pred: "prediction_score" # Optional score for the detection that forms the track update
+      # Ground truth fields (essential for MOTA, MOTP, IDF1)
+      object_id_gt: "gt_track_id"
+      bbox_gt: ["gx", "gy", "gw", "gh"] # xywh
+      # ignored_gt: "is_ignored_in_gt" # Optional: 0 or 1
+      # visibility_gt: "gt_visibility_ratio" # Optional: e.g. ratio of object visible
+
+evaluation_params:
+  performance:
+    target_latency_ms: 40.0 # e.g., for 25 FPS target
+  tracking:
+    mota_iou_threshold: 0.5 # IoU threshold for matching preds to GT for MOTA
+    bbox_pred_format: "xywh"
+    bbox_gt_format: "xywh"
+    # min_track_length_for_stability: 5 # For non-MOT metrics not yet fully implemented
+    scoring_weights: {mota_stability: 0.7, track_fragmentation: 0.15, id_consistency: 0.15} # Fragmentation/ID consistency scores are placeholders
+  overall_scoring_weights:
+    performance: 0.3
+    stability: 0.7
+
+report_settings:
+  output_dir: "./reports_tracking_example"
+  formats: ["md", "html"]
+  display_images: {enabled: false} # Image display less critical for pure tracking metrics
+  ai_insights: {enabled: false}
+```

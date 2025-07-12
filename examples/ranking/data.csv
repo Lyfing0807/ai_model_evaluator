@@ -1,0 +1,11 @@
+experiment_version,user_id,predicted_item_ids,prediction_scores,relevant_item_ids
+1,user1,"itemA,itemB,itemC,itemD,itemE","0.9,0.8,0.7,0.6,0.5","itemA,itemC,itemF"
+1,user1,"itemA,itemB,itemC,itemD,itemE",, "itemA,itemC,itemF" # Test with missing scores
+1,user2,"itemX,itemY,itemA,itemZ,itemW","0.95,0.85,0.80,0.70,0.60","itemX,itemW,itemB"
+2,user1,"itemB,itemA,itemD,itemC,itemG","0.88,0.85,0.78,0.72,0.65","itemA,itemC,itemF"
+2,user2,"itemX,itemZ,itemY,itemW,itemV","0.92,0.88,0.82,0.75,0.68","itemX,itemW,itemB"
+# Example with fewer than K predictions/GTs
+1,user3,"itemM,itemN","0.9,0.8","itemM,itemP,itemQ,itemR,itemS,itemT"
+2,user3,"itemM","0.85","itemM,itemP,itemQ,itemR,itemS,itemT"
+
+```

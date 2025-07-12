@@ -313,12 +313,83 @@ class DetectionStabilityEvaluator(StabilityEvaluatorBase):
 
         final_metrics_cleaned = {k: (None if isinstance(v, float) and (np.isnan(v) or np.isinf(v)) else v) for k, v in final_metrics.items()}
 
+        self._calculate_stability_score(cleaned_metrics, stats_df)
+
         logger.info("Detection stability evaluation completed.")
         return EvaluationResult(
-            metrics=final_metrics_cleaned,
+            metrics=cleaned_metrics,
             plots={},
-            extra_data={"object_stability_details_df": stability_stats_df}
+            extra_data={"object_stability_details_df": stats_df, "full_tracked_df_debug": tracked_df} # Keep full_tracked_df for now
         )
+
+    def _calculate_stability_score(self, metrics: Dict[str, Any], details_df: pl.DataFrame):
+        """Calculates overall detection stability score."""
+        if not self.eval_params or not self.eval_params.scoring_weights: # type: ignore
+            logger.warning("Detection stability scoring weights not configured. Skipping score calculation.")
+            return
+
+        weights = self.eval_params.scoring_weights # type: ignore
+
+        # Sub-score for Existence Stability (based on mean appearance consistency)
+        # Higher is better, already 0-1 range.
+        score_existence = normalize_metric_to_score(
+            metrics.get("det_stab_mean_appearance_consistency"),
+            is_0_1_rate_lower_better=False
+        )
+        if score_existence is None: score_existence = 0.0
+
+        # Sub-score for Position Stability (e.g. combination of IoU, drift, size jitter)
+        # For simplicity, let's primarily use mean_iou_consistency. Higher is better (0-1).
+        # And mean_center_drift_px (lower is better, need a target or good/bad thresholds)
+        # For now, let's just use IoU consistency for position score.
+        score_iou_consistency = normalize_metric_to_score(
+            metrics.get("det_stab_mean_iou_consistency"),
+            is_0_1_rate_lower_better=False
+        )
+        if score_iou_consistency is None: score_iou_consistency = 0.0
+        # In a more complex model, you might normalize drift and jitter and combine them.
+        # For now, we'll make position_stability primarily based on IoU consistency.
+        score_position = score_iou_consistency
+
+
+        # Sub-score for Confidence Stability (based on mean confidence_std). Lower is better.
+        # Need to define what's a "good" or "bad" std dev for confidence.
+        # Example: good_conf_std = 0.05, bad_conf_std = 0.2
+        score_confidence = normalize_metric_to_score(
+            metrics.get("det_stab_mean_confidence_std"),
+            good_threshold=0.05, # Example good value
+            bad_threshold=0.2,   # Example bad value
+            lower_is_better=True
+        )
+        if score_confidence is None: score_confidence = 0.0
+
+        # Sub-score for Category Stability (based on mean category_switch_rate). Lower is better (0-1).
+        score_category = normalize_metric_to_score(
+            metrics.get("det_stab_mean_category_switch_rate"),
+            is_0_1_rate_lower_better=True # (1 - rate) * 100
+        )
+        if score_category is None: score_category = 0.0
+
+        s_stability_detection = (
+            score_existence * weights.get("existence_stability", 0.0) +
+            score_position * weights.get("position_stability", 0.0) +
+            score_confidence * weights.get("confidence_stability", 0.0) +
+            score_category * weights.get("category_stability", 0.0)
+        )
+
+        total_weight = sum(weights.get(k,0.0) for k in ["existence_stability", "position_stability", "confidence_stability", "category_stability"])
+        if total_weight > 1e-6 and abs(total_weight - 1.0) > 1e-6:
+            logger.warning(f"Detection stability weights ({weights}) do not sum to 1. Normalizing score.")
+            s_stability_detection = s_stability_detection / total_weight
+        s_stability_detection = max(0.0, min(100.0, s_stability_detection))
+
+        metrics["det_stab_score_existence"] = score_existence
+        metrics["det_stab_score_position"] = score_position # Primarily IoU based for now
+        metrics["det_stab_score_confidence"] = score_confidence
+        metrics["det_stab_score_category"] = score_category
+        metrics["det_stab_score_overall"] = s_stability_detection # This is S_stability for detection
+        logger.info(f"Detection Stability Scores: Existence={score_existence:.2f}, Position={score_position:.2f}, Confidence={score_confidence:.2f}, Category={score_category:.2f}, Overall={s_stability_detection:.2f}")
+
 
 StabilityEvaluatorFactory.register_evaluator("detection", DetectionStabilityEvaluator)
 
@@ -380,8 +451,9 @@ report_settings: {output_dir: "./test_det_stab_output"} # Ensure output_dir is a
         # Total = 6
         assert results.extra_data["object_stability_details_df"].shape[0] == 6
         assert results.metrics.get("det_stab_num_total_tracked_instances") == 6.0
-        # Tracked multiple loops: objA, objD
         assert results.metrics.get("det_stab_num_unique_objects_tracked_multiple_loops") == 2.0
+    assert "det_stab_score_overall" in results.metrics # Check if score was calculated
+    assert results.metrics["det_stab_score_overall"] >= 0 and results.metrics["det_stab_score_overall"] <= 100
 
 
     logger.info("DetectionStabilityEvaluator test completed.")

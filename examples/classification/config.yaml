@@ -1,0 +1,38 @@
+project_info:
+  project_name: "Sample Classification Model Evaluation"
+  model_type: "classification"
+  run_id: "classification_example_run"
+
+data_loader:
+  image_base_dir: "../sample_images/"
+  field_mapping:
+    loop: "loop_num"
+    image_id: "image_identifier"
+    image_path: "path_to_image"
+    total_time_ms: "inference_duration_ms"
+    classification:
+      top_k_id_pattern: "predicted_label_top_{k}" # CSV has: predicted_label_top_1, predicted_label_top_2
+      top_k_score_pattern: "confidence_top_{k}" # CSV has: confidence_top_1, confidence_top_2
+
+evaluation_params:
+  performance:
+    target_latency_ms: 30.0
+    cv_target_threshold: 0.05
+  classification:
+    top_k: [1, 2] # Matches the K values used in the CSV columns (top_1, top_2)
+    scoring_weights: {prediction_consistency: 0.7, confidence_reliability: 0.3}
+  overall_scoring_weights:
+    performance: 0.3
+    stability: 0.7
+
+report_settings:
+  output_dir: "./reports_classification_example"
+  formats: ["html"] # Just HTML for this example
+  display_images:
+    enabled: true
+    max_per_category: 2
+    # draw_annotations for classification is usually false as there's no bbox/skeleton
+    draw_annotations: false
+  ai_insights:
+    enabled: false
+```

@@ -38,30 +38,40 @@ class AIInsightsGenerator:
         # Example: OPENAI_API_KEY is a common env var name
         # The actual env var name could be made configurable.
         import os
-        api_key_env_var = "OPENAI_API_KEY" # This could be part of insights_config
+        # Default to OPENAI_API_KEY, but could be made configurable via project_config or insights_config
+        api_key_env_var = getattr(self.insights_config, 'api_key_env_var', "OPENAI_API_KEY")
         key = os.getenv(api_key_env_var)
-        if not key:
+        if not key and self.config.enabled: # Only warn if enabled and key is missing
             logger.warning(
                 f"API Key environment variable '{api_key_env_var}' not set. "
                 "AI Insights will likely fail if API calls are attempted."
             )
         return key
 
-    def _build_prompt(self, chart_type: str, chart_data_summary: str, context: str) -> str:
+    def _build_prompt(self, chart_type: str, chart_data_summary: str, context_description: str, ideal_description: Optional[str]=None) -> str:
         """
-        Constructs a prompt for the LLM based on chart type, data, and context.
+        Constructs a more tailored prompt for the LLM.
         """
-        # This is a very generic prompt, needs to be tailored for specific charts/data.
-        prompt = (
-            f"You are an expert AI model performance analyst.\n"
-            f"The following data pertains to a chart of type: '{chart_type}'.\n"
-            f"Context: {context}\n"
-            f"Data Summary: {chart_data_summary}\n\n"
-            f"Please provide a brief (2-3 sentences) interpretation of this data, highlighting key insights or potential issues. "
-            f"Focus on what this data implies about the AI model's performance or stability. "
-            f"Be concise and data-driven. If the data is inconclusive, state that."
-        )
-        logger.debug(f"Generated LLM Prompt for {chart_type}:\n{prompt[:200]}...") # Log snippet
+        prompt_lines = [
+            "You are an expert AI model performance and stability analyst.",
+            f"You are analyzing a '{chart_type}' chart.",
+            f"Context: {context_description}",
+        ]
+        if ideal_description:
+            prompt_lines.append(f"Ideal characteristics for this chart: {ideal_description}")
+
+        prompt_lines.extend([
+            "The key data points summarized from this chart are as follows:",
+            chart_data_summary,
+            "\nBased on this data:",
+            "1. Briefly describe the main observation from the chart (1 sentence).",
+            "2. What are the key implications for the AI model's performance or stability? (1-2 sentences)",
+            "3. Are there any potential issues or areas for improvement highlighted by this data? (1 sentence, if applicable)",
+            "Be concise, data-driven, and objective. If the data is inconclusive or insufficient for a strong statement, indicate that."
+        ])
+
+        prompt = "\n".join(prompt_lines)
+        logger.debug(f"Generated LLM Prompt for {chart_type} (first 200 chars):\n{prompt[:200]}...")
         return prompt
 
     def _make_llm_api_call(self, prompt: str) -> Optional[str]:
