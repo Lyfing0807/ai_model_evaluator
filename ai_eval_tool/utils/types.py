@@ -1,16 +1,20 @@
 """
 Core data structures and type definitions used throughout the application.
 """
+
 from dataclasses import dataclass, field
-from typing import Dict, Any, List, Union
-import polars as pl
+
 # Type aliases for better code readability and type safety
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Union
+
+import polars as pl
 
 # For plot objects, it's tricky. Matplotlib Figure, Plotly Figure, or just paths/HTML strings.
 # Using 'Any' for now, or can define a Union type if specific plot libraries are fixed.
-PlotObject = Any # Union[matplotlib.figure.Figure, plotly.graph_objects.Figure, str, Path]
+PlotObject = (
+    Any  # Union[matplotlib.figure.Figure, plotly.graph_objects.Figure, str, Path]
+)
 
 # Common type aliases
 MetricsDict = Dict[str, Union[float, int, str, bool, None, List[Any]]]
@@ -20,6 +24,7 @@ BoundingBox = List[float]  # [x_min, y_min, x_max, y_max]
 RotatedBoundingBox = List[float]  # [center_x, center_y, width, height, angle]
 Keypoints = List[List[float]]  # [[x1, y1, confidence1], [x2, y2, confidence2], ...]
 FilePath = Union[str, Path]
+
 
 @dataclass
 class EvaluationResult:
@@ -38,9 +43,14 @@ class EvaluationResult:
                     such as DataFrames of abnormal samples, intermediate calculations, etc.
                     Example: {"slow_samples_df": <polars.DataFrame object>}
     """
+
     metrics: MetricsDict = field(default_factory=dict)
-    plots: PlotsDict = field(default_factory=dict) # Plot objects or their representations
-    extra_data: ExtraDataDict = field(default_factory=dict) # e.g., DataFrames of outliers
+    plots: PlotsDict = field(
+        default_factory=dict
+    )  # Plot objects or their representations
+    extra_data: ExtraDataDict = field(
+        default_factory=dict
+    )  # e.g., DataFrames of outliers
 
 
 if __name__ == "__main__":
@@ -63,34 +73,41 @@ if __name__ == "__main__":
 
     result_with_plot_path = EvaluationResult(
         metrics={"recall": 0.88},
-        plots={"recall_precision_curve": "path/to/recall_precision_curve.png"} # Placeholder path
+        plots={
+            "recall_precision_curve": "path/to/recall_precision_curve.png"
+        },  # Placeholder path
         # plots={"my_actual_plot": fig} # If storing actual plot object
     )
     print(f"\nResult with plot path: {result_with_plot_path}")
 
     # Create a result with extra data (e.g., a Polars DataFrame)
     try:
-        outlier_df = pl.DataFrame({
-            "image_id": ["img_001.jpg", "img_005.jpg"],
-            "latency_ms": [500.7, 610.2],
-            "reason": ["high_complexity", "resource_contention"]
-        })
+        outlier_df = pl.DataFrame(
+            {
+                "image_id": ["img_001.jpg", "img_005.jpg"],
+                "latency_ms": [500.7, 610.2],
+                "reason": ["high_complexity", "resource_contention"],
+            }
+        )
         result_with_extra_data = EvaluationResult(
             extra_data={"outlier_samples": outlier_df}
         )
-        print(f"\nResult with extra data (DataFrame):")
+        print("\nResult with extra data (DataFrame):")
         print(f"  Metrics: {result_with_extra_data.metrics}")
         print(f"  Plots: {result_with_extra_data.plots}")
         if "outlier_samples" in result_with_extra_data.extra_data:
-            print(f"  Outlier Samples DF Head:\n{result_with_extra_data.extra_data['outlier_samples'].head(1)}")
+            print(
+                f"  Outlier Samples DF Head:\n{result_with_extra_data.extra_data['outlier_samples'].head(1)}"
+            )
 
     except Exception as e:
-        print(f"\nError creating Polars DataFrame for example (Polars might not be fully installed in this basic env): {e}")
+        print(
+            f"\nError creating Polars DataFrame for example (Polars might not be fully installed in this basic env): {e}"
+        )
         result_with_extra_data = EvaluationResult(
             extra_data={"outlier_samples_placeholder": "DataFrame would be here"}
         )
         print(f"\nResult with extra data (placeholder): {result_with_extra_data}")
-
 
     # Example of a more complete result
     complex_result = EvaluationResult(
@@ -98,17 +115,15 @@ if __name__ == "__main__":
             "mean_total_time_ms": 150.2,
             "p95_total_time_ms": 300.5,
             "average_fps": 6.65,
-            "iou_consistency_mean": 0.78
+            "iou_consistency_mean": 0.78,
         },
         plots={
             "latency_distribution": "reports/run123/charts/latency_dist.png",
-            "iou_vs_time_interactive": "<div id='plotly_iou_time'>...</div>"
+            "iou_vs_time_interactive": "<div id='plotly_iou_time'>...</div>",
         },
         extra_data={
             "failed_tracking_ids": [101, 203, 505],
-            "low_confidence_detections_df": "DataFrame object or path to CSV" # Placeholder
-        }
+            "low_confidence_detections_df": "DataFrame object or path to CSV",  # Placeholder
+        },
     )
     print(f"\nComplex result example: {complex_result.metrics['average_fps']}")
-
-```

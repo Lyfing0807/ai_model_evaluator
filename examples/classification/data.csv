@@ -8,4 +8,3 @@ loop_num,image_identifier,path_to_image,inference_duration_ms,predicted_label_to
 3,img_A.jpg,classification/img_A.jpg,25,dog,0.80,cat,0.15
 3,img_B.jpg,classification/img_B.jpg,28,dog,0.82,cat,0.12
 3,img_C.jpg,classification/img_C.jpg,22,plane,0.50,bird,0.45
-```

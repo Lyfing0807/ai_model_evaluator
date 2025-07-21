@@ -37,4 +37,3 @@ report_settings:
     draw_annotations: true
   ai_insights:
     enabled: false
-```

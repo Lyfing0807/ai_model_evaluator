@@ -7,5 +7,3 @@ experiment_version,user_id,predicted_item_ids,prediction_scores,relevant_item_id
 # Example with fewer than K predictions/GTs
 1,user3,"itemM,itemN","0.9,0.8","itemM,itemP,itemQ,itemR,itemS,itemT"
 2,user3,"itemM","0.85","itemM,itemP,itemQ,itemR,itemS,itemT"
-
-```

@@ -44,7 +44,7 @@ graph TD
     C -- 指导 --> D
 
     D -- 输出DataFrame --> E
-    
+
     E -- 1.执行通用评估 --> P
     E -- 2.执行专项评估 --> S
 
@@ -208,7 +208,7 @@ def process_classification_data(df, config):
     top_k_values = config.evaluation_params.classification.top_k # e.g., [1, 3, 5]
     id_pattern = config.data_loader.field_mapping.classification.top_k_id_pattern
     score_pattern = config.data_loader.field_mapping.classification.top_k_score_pattern
-    
+
     all_rows_labels = []
     all_rows_scores = []
 
@@ -216,25 +216,25 @@ def process_classification_data(df, config):
     for index, row in df.iterrows():
         labels_for_this_row = []
         scores_for_this_row = []
-        
+
         for k in top_k_values:
             id_col_name = id_pattern.format(k=k)
             score_col_name = score_pattern.format(k=k)
-            
+
             if id_col_name in row and score_col_name in row:
                 labels_for_this_row.append(row[id_col_name])
                 scores_for_this_row.append(row[score_col_name])
-        
+
         all_rows_labels.append(labels_for_this_row)
         all_rows_scores.append(scores_for_this_row)
 
     # 在DataFrame中创建两个新的、统一的列
     df['top_k_labels'] = all_rows_labels
     df['top_k_scores'] = all_rows_scores
-    
+
     # 删除原有的离散 top-k 列，以保持数据整洁
     # ... (删除 df['top1标签id'], df['top1置信度'] 等列) ...
-    
+
     return df
 ```
 
@@ -263,7 +263,7 @@ sequenceDiagram
     StabilityFactory->>DetectionEvaluator: 创建实例()
     DetectionEvaluator-->>StabilityFactory: 返回实例
     StabilityFactory-->>Engine: 返回检测稳定性评估器实例
-    
+
     Engine->>DetectionEvaluator: evaluate(data, config)
     note right of DetectionEvaluator: 执行检测模型专属的<br/>稳定性评估逻辑
     DetectionEvaluator-->>Engine: 返回稳定性结果
@@ -366,7 +366,7 @@ sequenceDiagram
 
     RG->>Chart: 生成图表(例如: 可靠性图)
     Chart-->>RG: 返回图表图像和背后数据(Data JSON)
-    
+
     RG->>RG: 读取配置(ai_insights.enabled == true?)
     alt 如果启用AI解读
         RG->>RG: 1. 准备上下文 (指标定义等)
@@ -685,7 +685,7 @@ ai_model_evaluator/
 ├── pyproject.toml           # 项目元数据和直接依赖的定义文件
 ├── requirements.lock        # 由uv生成的完全锁定的依赖文件
 │
-├── log/                     # 运行日志          
+├── log/                     # 运行日志
 ├── examples/                # 交付给用户的运行示例
 │   ├── README.md            # 示例教程
 │   ├── classification/

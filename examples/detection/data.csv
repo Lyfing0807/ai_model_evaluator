@@ -5,4 +5,3 @@ loop_id,image_filename,relative_image_loc,latency_ms,class_id,confidence,x_cente
 2,img_001.png,detection/img_001.png,58,0,0.88,102,103,50,60
 2,img_001.png,detection/img_001.png,58,1,0.82,200,150,40,40
 2,img_002.png,detection/img_002.png,62,0,0.90,51,52,30,30
-```

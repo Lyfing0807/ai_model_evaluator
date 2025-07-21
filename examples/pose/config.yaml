@@ -35,4 +35,3 @@ report_settings:
     max_per_category: 1
     draw_annotations: true # Will attempt to draw skeletons if implemented
   ai_insights: {enabled: false}
-```

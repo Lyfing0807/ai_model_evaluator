@@ -132,4 +132,3 @@ report_settings:
     api_endpoint: "https://api.openai.com/v1/chat/completions" # LLM API endpoint
     # API Key should be set via environment variable (e.g., OPENAI_API_KEY), not here.
     cache_responses: true     # Whether to cache LLM responses
-```

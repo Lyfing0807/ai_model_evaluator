@@ -33,4 +33,3 @@ report_settings:
     max_per_category: 2
     draw_annotations: true # Will attempt to draw rotated bboxes if implemented fully
   ai_insights: {enabled: false}
-```

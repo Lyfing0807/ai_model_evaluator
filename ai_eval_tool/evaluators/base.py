@@ -1,18 +1,25 @@
 """
 Base classes for all evaluators.
 """
+
 from abc import ABC, abstractmethod
+
 import polars as pl
+
 from ..config_manager import MainConfig
-from ..utils.types import EvaluationResult # Assuming EvaluationResult is defined in utils.types
 from ..utils.logging_config import get_logger
+from ..utils.types import (
+    EvaluationResult,  # Assuming EvaluationResult is defined in utils.types
+)
 
 logger = get_logger(__name__)
+
 
 class EvaluatorBase(ABC):
     """
     Abstract base class for all evaluators.
     """
+
     def __init__(self, config: MainConfig):
         self.config = config
         self.model_type = config.project_info.model_type
@@ -32,12 +39,14 @@ class EvaluatorBase(ABC):
         """
         pass
 
+
 class StabilityEvaluatorBase(EvaluatorBase):
     """
     Abstract base class for model-specific stability evaluators.
     It inherits from EvaluatorBase and can add more specific common methods
     for stability evaluators if needed in the future.
     """
+
     def __init__(self, config: MainConfig):
         super().__init__(config)
         # Access model-specific evaluation parameters
@@ -47,7 +56,9 @@ class StabilityEvaluatorBase(EvaluatorBase):
                 f"No specific evaluation parameters found for model type '{self.model_type}' "
                 f"in StabilityEvaluatorBase initialization."
             )
-        logger.debug(f"StabilityEvaluatorBase initialized for model type: {self.model_type}")
+        logger.debug(
+            f"StabilityEvaluatorBase initialized for model type: {self.model_type}"
+        )
 
     @abstractmethod
     def evaluate(self, data_df: pl.DataFrame) -> EvaluationResult:
@@ -61,4 +72,3 @@ class StabilityEvaluatorBase(EvaluatorBase):
             An EvaluationResult object.
         """
         pass
-```

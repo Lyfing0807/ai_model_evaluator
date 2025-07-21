@@ -5,4 +5,3 @@ eval_loop,source_image_id,image_file_path,processing_time,obj_class,obj_score,cx
 2,rimg_01.jpg,rotated/rimg_01.jpg,122,0,0.93,101,151,50,30,16.5
 2,rimg_01.jpg,rotated/rimg_01.jpg,122,1,0.85,250,200,60,25,-28.0 # Angle changed slightly
 2,rimg_02.jpg,rotated/rimg_02.jpg,128,0,0.88,80,100,45,28,2.0  # Angle changed
-```

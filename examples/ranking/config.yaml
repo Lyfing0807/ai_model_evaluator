@@ -30,4 +30,3 @@ report_settings:
   formats: ["md", "html"]
   display_images: {enabled: false} # No images for ranking reports typically
   ai_insights: {enabled: false}
-```

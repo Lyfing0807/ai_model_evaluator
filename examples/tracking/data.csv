@@ -13,4 +13,3 @@ run_id,frame_num,frame_processing_time,predicted_track_id,px,py,pw,ph,prediction
 2,2,35,21,53,53,25,25,0.79,,,,,
 2,3,34,20,16,16,20,30,0.87,100,15,15,20,30
 2,3,34,22,200,200,20,20,0.90,102,200,200,20,20 # PRED 22 now detects GT 102
-```

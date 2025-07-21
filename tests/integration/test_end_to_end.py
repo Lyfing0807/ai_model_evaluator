@@ -1,11 +1,13 @@
 """
 End-to-end integration tests for the AI evaluation tool.
 """
-import pytest
-import tempfile
+
 import shutil
+import tempfile
 from pathlib import Path
+
 import polars as pl
+import pytest
 
 from ai_eval_tool.config_manager import load_config
 from ai_eval_tool.data_loader import DataLoader
@@ -39,7 +41,7 @@ def sample_detection_data(temp_workspace):
         "w": [50, 60] * 6,
         "h": [50, 40] * 6,
     }
-    
+
     df = pl.DataFrame(data)
     csv_path = temp_workspace / "detection_data.csv"
     df.write_csv(csv_path)
@@ -83,7 +85,7 @@ report_settings:
   formats: ["markdown"]
   include_charts: true
 """
-    
+
     config_path = temp_workspace / "config.yaml"
     config_path.write_text(config_content)
     return config_path
@@ -91,55 +93,57 @@ report_settings:
 
 class TestEndToEndDetection:
     """End-to-end tests for detection model evaluation."""
-    
-    def test_full_detection_pipeline(self, detection_config, sample_detection_data, temp_workspace):
+
+    def test_full_detection_pipeline(
+        self, detection_config, sample_detection_data, temp_workspace
+    ):
         """Test the complete detection evaluation pipeline."""
         # Load configuration
         config = load_config(detection_config)
         assert config.project_info.model_type == "detection"
-        
+
         # Load data
         data_loader = DataLoader(config)
         data_df = data_loader.load_data(sample_detection_data)
-        
+
         # Verify data loading
         assert data_df.shape[0] > 0
         assert "internal_bbox" in data_df.columns
         assert "category_id" in data_df.columns
         assert "score" in data_df.columns
-        
+
         # Run evaluation
         engine = EvaluationEngine(config)
         results = engine.run(data_df)
-        
+
         # Verify evaluation results
         assert "perf_mean_fps" in results.metrics
         assert "perf_mean_inference_time_ms" in results.metrics
         assert "det_stab_mean_iou_consistency" in results.metrics
         assert "det_stab_mean_bbox_drift" in results.metrics
-        
+
         # Verify performance metrics are reasonable
         assert results.metrics["perf_mean_fps"] > 0
         assert results.metrics["perf_mean_inference_time_ms"] > 0
-        
+
         # Verify stability metrics are in expected range
         assert 0 <= results.metrics["det_stab_mean_iou_consistency"] <= 1
         assert results.metrics["det_stab_mean_bbox_drift"] >= 0
-        
+
         # Generate report
         report_generator = ReportGenerator(config)
         report_generator.generate(results, config.project_info.run_id)
-        
+
         # Verify report files exist
         output_dir = Path(config.report_settings.output_dir)
         assert (output_dir / "report.md").exists()
-        
+
         # Verify report content
         report_content = (output_dir / "report.md").read_text()
         assert "Integration Test Detection" in report_content
         assert "Performance Metrics" in report_content
         assert "Stability Analysis" in report_content
-    
+
     def test_memory_optimization_large_dataset(self, detection_config, temp_workspace):
         """Test memory optimization with a larger dataset."""
         # Create a larger dataset
@@ -158,24 +162,24 @@ class TestEndToEndDetection:
             "w": [50 + i % 50 for i in range(5000)],
             "h": [50 + i % 50 for i in range(5000)],
         }
-        
+
         df = pl.DataFrame(large_data)
         large_csv_path = temp_workspace / "large_detection_data.csv"
         df.write_csv(large_csv_path)
-        
+
         # Load and process large dataset
         config = load_config(detection_config)
         data_loader = DataLoader(config)
         data_df = data_loader.load_data(large_csv_path)
-        
+
         # Verify data was loaded and optimized
         assert data_df.shape[0] == 5000
         assert "internal_bbox" in data_df.columns
-        
+
         # Run evaluation on large dataset
         engine = EvaluationEngine(config)
         results = engine.run(data_df)
-        
+
         # Verify results are still valid
         assert "perf_mean_fps" in results.metrics
         assert "det_stab_mean_iou_consistency" in results.metrics
@@ -184,34 +188,36 @@ class TestEndToEndDetection:
 
 class TestCacheAndSerialization:
     """Test caching and serialization functionality."""
-    
-    def test_serialize_deserialize_results(self, detection_config, sample_detection_data, temp_workspace):
+
+    def test_serialize_deserialize_results(
+        self, detection_config, sample_detection_data, temp_workspace
+    ):
         """Test serialization and deserialization of evaluation results."""
         config = load_config(detection_config)
         data_loader = DataLoader(config)
         data_df = data_loader.load_data(sample_detection_data)
-        
+
         engine = EvaluationEngine(config)
         original_results = engine.run(data_df)
-        
+
         # Serialize results
         cache_path = temp_workspace / "cache"
         run_id = "test-serialize-001"
         engine.serialize_results(original_results, cache_path, run_id)
-        
+
         # Verify cache files exist
         cache_dir = cache_path / run_id
         assert cache_dir.exists()
         assert (cache_dir / "metrics.json").exists()
         assert (cache_dir / "extra_data.pkl").exists()
-        
+
         # Deserialize results
         deserialized_results = engine.deserialize_results(cache_path, run_id)
-        
+
         # Verify deserialized results match original
         assert deserialized_results.metrics == original_results.metrics
         assert len(deserialized_results.extra_data) == len(original_results.extra_data)
-        
+
         # Verify DataFrames are preserved correctly
         for key in original_results.extra_data:
             if isinstance(original_results.extra_data[key], pl.DataFrame):
@@ -237,7 +243,7 @@ def classification_data(temp_workspace):
         "class_top_3_id": ["dog", "fish", "fox", "fish"] * 2,
         "class_top_3_score": [0.8, 0.85, 0.75, 0.82] * 2,
     }
-    
+
     df = pl.DataFrame(data)
     csv_path = temp_workspace / "classification_data.csv"
     df.write_csv(csv_path)
@@ -279,7 +285,7 @@ report_settings:
   formats: ["markdown"]
   include_charts: true
 """
-    
+
     config_path = temp_workspace / "cls_config.yaml"
     config_path.write_text(config_content)
     return config_path
@@ -287,34 +293,36 @@ report_settings:
 
 class TestEndToEndClassification:
     """End-to-end tests for classification model evaluation."""
-    
-    def test_full_classification_pipeline(self, classification_config, classification_data, temp_workspace):
+
+    def test_full_classification_pipeline(
+        self, classification_config, classification_data, temp_workspace
+    ):
         """Test the complete classification evaluation pipeline."""
         config = load_config(classification_config)
         data_loader = DataLoader(config)
         data_df = data_loader.load_data(classification_data)
-        
+
         # Verify classification-specific data processing
         assert "top_k_labels" in data_df.columns
         assert "top_k_scores" in data_df.columns
-        
+
         # Run evaluation
         engine = EvaluationEngine(config)
         results = engine.run(data_df)
-        
+
         # Verify classification-specific metrics
         assert "cls_stab_mean_top_1_consistency_rate" in results.metrics
-        assert "cls_stab_mean_jaccard_top_1" in results.metrics
-        assert "cls_stab_mean_jaccard_top_3" in results.metrics
-        
+        for k in config.evaluation_params.classification.top_k:
+            assert f"cls_stab_mean_jaccard_top_{k}" in results.metrics
+
         # Generate report
         report_generator = ReportGenerator(config)
         report_generator.generate(results, config.project_info.run_id)
-        
+
         # Verify report
         output_dir = Path(config.report_settings.output_dir)
         assert (output_dir / "report.md").exists()
-        
+
         report_content = (output_dir / "report.md").read_text()
         assert "Classification" in report_content
         assert "Top-K Consistency" in report_content

@@ -39,4 +39,3 @@ report_settings:
   formats: ["md", "html"]
   display_images: {enabled: false} # Image display less critical for pure tracking metrics
   ai_insights: {enabled: false}
-```

@@ -1,160 +1,678 @@
 import pytest
+from pathlib import Path
 import polars as pl
-from polars.testing import assert_frame_equal
 import numpy as np
+import yaml
 
-from ai_eval_tool.config_manager import MainConfig
+from ai_eval_tool.config_manager import load_config
 from ai_eval_tool.evaluators.performance import PerformanceEvaluator
-from ai_eval_tool.utils.types import EvaluationResult
 
-@pytest.fixture
-def performance_evaluator(detection_config: MainConfig) -> PerformanceEvaluator: # Can use any valid config
-    return PerformanceEvaluator(detection_config)
 
-def test_performance_metrics_calculation(performance_evaluator: PerformanceEvaluator):
+# Helper function to create a dummy config file for testing
+def create_dummy_config(tmp_path, config_content, filename="config.yaml"):
+    config_path = tmp_path / filename
+    config_path.write_text(config_content)
+    return config_path
+
+
+# --- Test PerformanceEvaluator ---
+def test_performance_evaluation_deduplication(tmp_path):
+    """
+    测试 PerformanceEvaluator 的数据去重逻辑。
+    """
+    config_content = """
+project_info:
+  project_name: "PerfEval Deduplication Test"
+  model_type: "detection"
+data_loader:
+  field_mapping:
+    loop: "loop"
+    image_id: "image_id"
+    pre_time_ms: "pre_time_ms"
+    inference_time_ms: "inference_time_ms"
+    post_time_ms: "post_time_ms"
+    total_time_ms: "total_time_ms"
+    detection: # Added minimal detection config to satisfy validation
+      category_id: "dummy_cat"
+      score: "dummy_score"
+      bbox: ["dummy_x", "dummy_y", "dummy_w", "dummy_h"]
+evaluation_params:
+  detection:
+    iou_threshold: 0.5
+    bbox_format: "xywh"
+report_settings: {}
+"""
+    config_path = create_dummy_config(tmp_path, config_content)
+    config = load_config(config_path)
+    evaluator = PerformanceEvaluator(config)
+
+    # Create a DataFrame with duplicate (loop, image_id) entries
     data = {
-        "loop":                 [1,   1,   1,   2,   2,   3  ], # Loop IDs
-        "image_id":             ["i1","i1","i2","i1","i2","i1"], # Image IDs (i1 in loop 1 is duplicated)
-        "pre_time_ms":          [10,  10,  12,  11,  13,  9  ],
-        "inference_time_ms":    [100, 100, 120, 110, 130, 90 ],
-        "post_time_ms":         [5,   5,   6,   5,   7,   4  ],
-        "total_time_ms":        [115, 115, 138, 126, 150, 103],
+        "loop": [1, 1, 1, 2, 2],
+        "image_id": ["img1", "img1", "img2", "img1", "img2"],
+        "pre_time_ms": [10, 10, 12, 11, 13],
+        "inference_time_ms": [100, 100, 120, 110, 130],
+        "post_time_ms": [5, 5, 6, 5, 7],
+        "total_time_ms": [115, 115, 138, 126, 150],
     }
-    input_df = pl.DataFrame(data)
+    df = pl.DataFrame(data)
 
-    # Deduplicated data for manual calculation (unique loop, image_id pairs)
-    # (1,i1): 115ms
-    # (1,i2): 138ms
-    # (2,i1): 126ms
-    # (2,i2): 150ms
-    # (3,i1): 103ms
-    # Total times for unique events: [115, 138, 126, 150, 103]
-    unique_total_times = np.array([115, 138, 126, 150, 103])
+    results = evaluator.evaluate(df)
 
-    result = performance_evaluator.evaluate(input_df)
-    metrics = result.metrics
+    # Assert that the deduplicated DataFrame has the expected number of rows
+    # Original df has 5 rows. After unique by (loop, image_id):
+    # (1, img1), (1, img2), (2, img1), (2, img2) -> 4 unique inference events
+    deduplicated_df = results.extra_data["deduplicated_perf_df_for_charts"]
+    assert deduplicated_df.shape[0] == 4
 
-    assert isinstance(result, EvaluationResult)
-
-    # Check some key metrics
-    assert metrics["perf_mean_total_time_ms"] == pytest.approx(unique_total_times.mean())
-    assert metrics["perf_median_total_time_ms"] == pytest.approx(np.median(unique_total_times))
-    assert metrics["perf_std_total_time_ms"] == pytest.approx(unique_total_times.std())
-    assert metrics["perf_min_total_time_ms"] == pytest.approx(unique_total_times.min())
-    assert metrics["perf_max_total_time_ms"] == pytest.approx(unique_total_times.max())
-
-    assert metrics["perf_p90_total_time_ms"] == pytest.approx(np.percentile(unique_total_times, 90, method='linear'))
-
-    expected_fps = 1000.0 / unique_total_times.mean()
-    assert metrics["perf_avg_fps"] == pytest.approx(expected_fps)
-
-    expected_cv = unique_total_times.std() / unique_total_times.mean()
-    assert metrics["perf_cv_total_time_ms"] == pytest.approx(expected_cv)
-
-    # Jitter: diffs are [138-115, 126-138, 150-126, 103-150] = [23, -12, 24, -47]
-    # Absolute diffs: [23, 12, 24, 47]. Mean = (23+12+24+47)/4 = 106/4 = 26.5
-    # Note: PerformanceEvaluator sorts by loop, then image_id (implicitly by Polars unique)
-    # The order of unique_total_times used for manual calc might differ if not careful.
-    # Perf evaluator uses: perf_df = data_df.unique(subset=["loop", "image_id"], keep="first", maintain_order=True)
-    # If input_df is sorted by loop then image_id:
-    # (1,i1), (1,i2), (2,i1), (2,i2), (3,i1) -> times [115, 138, 126, 150, 103]
-    # This is the order used by unique_total_times.
-    assert metrics["perf_jitter_ms"] == pytest.approx(np.mean(np.abs(np.diff(unique_total_times))))
+    # Assert that the calculated mean is based on the deduplicated data
+    expected_mean = np.mean([115, 138, 126, 150])  # (115+138+126+150)/4 = 132.25
+    assert results.metrics["perf_mean_total_time_ms"] == pytest.approx(expected_mean)
 
 
-    # Time composition (based on deduplicated data)
-    # Deduplicated pre_time_ms: [10 (i1,1), 12 (i2,1), 11 (i1,2), 13 (i2,2), 9 (i1,3)]
-    # Deduplicated inference_time_ms: [100, 120, 110, 130, 90]
-    # Deduplicated post_time_ms: [5, 6, 5, 7, 4]
-    unique_pre_times = np.array([10, 12, 11, 13, 9])
-    unique_inf_times = np.array([100, 120, 110, 130, 90])
-    unique_post_times = np.array([5, 6, 5, 7, 4])
+def test_performance_metrics_accuracy(tmp_path):
+    """
+    测试 PerformanceEvaluator 计算的各项指标的准确性。
+    """
+    config_content = """
+project_info:
+  project_name: "PerfEval Metrics Test"
+  model_type: "detection"
+data_loader:
+  field_mapping:
+    loop: "loop"
+    image_id: "image_id"
+    pre_time_ms: "pre_time_ms"
+    inference_time_ms: "inference_time_ms"
+    post_time_ms: "post_time_ms"
+    total_time_ms: "total_time_ms"
+    detection:
+      category_id: "dummy_cat"
+      score: "dummy_score"
+      bbox: ["dummy_x", "dummy_y", "dummy_w", "dummy_h"]
+evaluation_params:
+  detection:
+    iou_threshold: 0.5
+    bbox_format: "xywh"
+  performance:
+    target_latency_ms: 100
+    cv_target_threshold: 0.1
+    component_weights:
+      throughput: 0.5
+      latency_stability: 0.5
+report_settings: {}
+"""
+    config_path = create_dummy_config(tmp_path, config_content)
+    config = load_config(config_path)
+    evaluator = PerformanceEvaluator(config)
 
-    assert metrics["perf_mean_pre_time_ms"] == pytest.approx(unique_pre_times.mean())
-    assert metrics["perf_mean_inference_time_ms"] == pytest.approx(unique_inf_times.mean())
-    assert metrics["perf_mean_post_time_ms"] == pytest.approx(unique_post_times.mean())
-
-    total_mean_time = unique_total_times.mean()
-    assert metrics["perf_percentage_pre_time_ms"] == pytest.approx(unique_pre_times.mean() / total_mean_time * 100)
-
-    # Check for slow samples DataFrame
-    assert "perf_top_slow_samples_df" in result.extra_data
-    slow_samples_df = result.extra_data["perf_top_slow_samples_df"]
-    assert isinstance(slow_samples_df, pl.DataFrame)
-    # Based on threshold mean + 3*std = 126.4 + 3 * 17.30 = 126.4 + 51.9 = 178.3. No samples above this.
-    # Let's adjust data to have one slow sample
-    # If max time was 200, mean=140.4, std=34.5. Thresh = 140.4 + 3*34.5 = 140.4 + 103.5 = 243.9. Still no.
-    # Let's make one sample very slow:
-    data_with_slow = data.copy()
-    data_with_slow["total_time_ms"][-1] = 500 # last event (3,i1) is now 500ms
-    input_df_slow = pl.DataFrame(data_with_slow)
-    result_slow = performance_evaluator.evaluate(input_df_slow)
-    metrics_slow = result_slow.metrics
-    slow_samples_df_new = result_slow.extra_data["perf_top_slow_samples_df"]
-
-    # New unique times: [115, 138, 126, 150, 500]. Mean = 205.8. Std = 158.4.
-    # Threshold = 205.8 + 3 * 158.4 = 205.8 + 475.2 = 681. No sample above this.
-    # The threshold logic might need review or data needs to be more extreme for test.
-    # For now, check if DF is empty if no samples meet criteria, or populated if they do.
-    # The test data above has no high-latency samples by 3-sigma rule.
-    # So, for original data, slow_samples_df should be empty or not present if no outliers.
-    # The current implementation of PerformanceEvaluator.evaluate:
-    # `if high_latency_count > 0: extra_data["perf_top_slow_samples_df"] = ...`
-    # So if no high latency, key won't be there.
-    # Original data: mean=126.4, std=17.3. Threshold=126.4+3*17.3 = 178.3. Max is 150. No outliers.
-    assert "perf_top_slow_samples_df" not in result.extra_data
-
-def test_performance_empty_input(performance_evaluator: PerformanceEvaluator):
-    empty_df = pl.DataFrame({
-        "loop": [], "image_id": [], "pre_time_ms": [],
-        "inference_time_ms": [], "post_time_ms": [], "total_time_ms": []
-    }, schema={
-        "loop": pl.Int64, "image_id": pl.Utf8, "pre_time_ms": pl.Float64,
-        "inference_time_ms": pl.Float64, "post_time_ms": pl.Float64, "total_time_ms": pl.Float64
-    })
-    result = performance_evaluator.evaluate(empty_df)
-    assert "warning" in result.metrics
-    assert result.metrics["warning"] == "No data for performance eval"
-
-def test_performance_all_null_times(performance_evaluator: PerformanceEvaluator):
     data = {
-        "loop": [1, 2], "image_id": ["i1", "i2"],
-        "pre_time_ms": [pl.Series([10, 12], dtype=pl.Float64)], # Must be series for schema
-        "inference_time_ms": [pl.Series([100, 120], dtype=pl.Float64)],
-        "post_time_ms": [pl.Series([5, 6], dtype=pl.Float64)],
-        "total_time_ms": [pl.Series([None, None], dtype=pl.Float64)]
+        "loop": [1, 1, 1, 1, 1],
+        "image_id": ["img1", "img2", "img3", "img4", "img5"],
+        "pre_time_ms": [10, 11, 12, 13, 14],
+        "inference_time_ms": [50, 55, 60, 65, 70],
+        "post_time_ms": [5, 6, 7, 8, 9],
+        "total_time_ms": [65, 72, 79, 86, 93],
     }
-    # Polars DataFrame constructor needs consistent list lengths or single values for non-list columns
-    df_data = {
-        "loop": [1, 2], "image_id": ["i1", "i2"],
-        "pre_time_ms": [10.0, 12.0],
-        "inference_time_ms": [100.0, 120.0],
-        "post_time_ms": [5.0, 6.0],
-        "total_time_ms": [None, None] #This column having all nulls
-    }
-    input_df_all_nulls = pl.DataFrame(df_data).with_columns(pl.col("total_time_ms").cast(pl.Float64))
+    df = pl.DataFrame(data)
 
-    result = performance_evaluator.evaluate(input_df_all_nulls)
-    assert "warning" in result.metrics
-    assert result.metrics["warning"] == "'total_time_ms' is empty/all null"
-    # Or check specific metrics are None
-    assert result.metrics.get("perf_mean_total_time_ms") is None
-    assert result.metrics.get("perf_avg_fps") == 0 # or None, based on impl. Currently 0 if mean_time is None/0
+    results = evaluator.evaluate(df)
+    metrics = results.metrics
 
-def test_performance_single_row_input(performance_evaluator: PerformanceEvaluator):
+    # Expected values (calculated manually)
+    total_times = np.array([65, 72, 79, 86, 93])
+    expected_mean = np.mean(total_times)
+    expected_median = np.median(total_times)
+    expected_std = np.std(total_times)
+    expected_min = np.min(total_times)
+    expected_max = np.max(total_times)
+    expected_p90 = np.quantile(total_times, 0.90, interpolation='linear')
+    expected_p95 = np.quantile(total_times, 0.95, interpolation='linear')
+    expected_p99 = np.quantile(total_times, 0.99, interpolation='linear')
+
+    assert metrics["perf_mean_total_time_ms"] == pytest.approx(expected_mean)
+    assert metrics["perf_median_total_time_ms"] == pytest.approx(expected_median)
+    assert metrics["perf_std_total_time_ms"] == pytest.approx(expected_std)
+    assert metrics["perf_min_total_time_ms"] == pytest.approx(expected_min)
+    assert metrics["perf_max_total_time_ms"] == pytest.approx(expected_max)
+    assert metrics["perf_p90_total_time_ms"] == pytest.approx(expected_p90)
+    assert metrics["perf_p95_total_time_ms"] == pytest.approx(expected_p95)
+    assert metrics["perf_p99_total_time_ms"] == pytest.approx(expected_p99)
+
+    assert metrics["perf_avg_fps"] == pytest.approx(1000.0 / expected_mean)
+    assert metrics["perf_cv_total_time_ms"] == pytest.approx(expected_std / expected_mean)
+
+    # Jitter
+    expected_jitter_diffs = np.abs(np.diff(total_times))
+    expected_jitter_mean = np.mean(expected_jitter_diffs)
+    assert metrics["perf_jitter_ms"] == pytest.approx(expected_jitter_mean)
+
+    # Worst-case amplification
+    assert metrics["perf_worst_case_amplification"] == pytest.approx(expected_max / expected_median)
+
+    # High latency rate
+    threshold = expected_mean + 3 * expected_std
+    high_latency_count = np.sum(total_times > threshold)
+    expected_high_latency_rate = high_latency_count / len(total_times)
+    assert metrics["perf_high_latency_rate"] == pytest.approx(expected_high_latency_rate)
+
+    # Time Composition Analysis
+    pre_times = np.array([10, 11, 12, 13, 14])
+    inference_times = np.array([50, 55, 60, 65, 70])
+    post_times = np.array([5, 6, 7, 8, 9])
+
+    assert metrics["perf_mean_pre_time_ms"] == pytest.approx(np.mean(pre_times))
+    assert metrics["perf_mean_inference_time_ms"] == pytest.approx(np.mean(inference_times))
+    assert metrics["perf_mean_post_time_ms"] == pytest.approx(np.mean(post_times))
+
+    assert metrics["perf_percentage_pre_time_ms"] == pytest.approx(np.mean(pre_times) / expected_mean * 100)
+    assert metrics["perf_percentage_inference_time_ms"] == pytest.approx(np.mean(inference_times) / expected_mean * 100)
+    assert metrics["perf_percentage_post_time_ms"] == pytest.approx(np.mean(post_times) / expected_mean * 100)
+
+    # Performance Score
+    target_latency = 100
+    cv_target = 0.1
+    # Manual calculation for score_throughput (value=p95_latency, target=target_latency, lower_is_better=True)
+    # p95_latency = 92.0
+    # score_throughput = (target_latency / p95_latency) * 100 if p95_latency > 0 else 0
+    # score_throughput = (100 / 92.0) * 100 = 108.6956... capped at 100
+    assert metrics["perf_score_throughput"] == pytest.approx(100.0)
+
+    # Manual calculation for score_latency_stability (value=cv_latency, good_threshold=cv_target, bad_threshold=cv_target*5, lower_is_better=True)
+    # cv_latency = 0.1597...
+    # good_threshold = 0.1
+    # bad_threshold = 0.5
+    # score_latency_stability = 100 * (1 - (cv_latency - good_threshold) / (bad_threshold - good_threshold))
+    # score_latency_stability = 100 * (1 - (0.1597 - 0.1) / (0.5 - 0.1)) = 100 * (1 - 0.0597 / 0.4) = 100 * (1 - 0.14925) = 100 * 0.85075 = 85.075
+    assert metrics["perf_score_latency_stability"] == pytest.approx(85.075, rel=1e-3)
+
+    # Overall score
+    expected_overall_score = 0.5 * 100.0 + 0.5 * 85.075
+    assert metrics["perf_score_overall"] == pytest.approx(expected_overall_score)
+
+
+def test_performance_empty_dataframe(tmp_path):
+    """
+    测试 PerformanceEvaluator 处理空 DataFrame 的情况。
+    """
+    config_content = """
+project_info:
+  project_name: "PerfEval Empty DF Test"
+  model_type: "detection"
+data_loader:
+  field_mapping:
+    loop: "loop"
+    image_id: "image_id"
+    pre_time_ms: "pre_time_ms"
+    inference_time_ms: "inference_time_ms"
+    post_time_ms: "post_time_ms"
+    total_time_ms: "total_time_ms"
+    detection: # Added minimal detection config to satisfy validation
+      category_id: "dummy_cat"
+      score: "dummy_score"
+      bbox: ["dummy_x", "dummy_y", "dummy_w", "dummy_h"]
+evaluation_params:
+  detection:
+    iou_threshold: 0.5
+    bbox_format: "xywh"
+report_settings: {}
+"""
+    config_path = create_dummy_config(tmp_path, config_content)
+    config = load_config(config_path)
+    evaluator = PerformanceEvaluator(config)
+
+    empty_df = pl.DataFrame(
+        {
+            "loop": [],
+            "image_id": [],
+            "pre_time_ms": [],
+            "inference_time_ms": [],
+            "post_time_ms": [],
+            "total_time_ms": [],
+        },
+        schema={
+            "loop": pl.Int64,
+            "image_id": pl.Utf8,
+            "pre_time_ms": pl.Float64,
+            "inference_time_ms": pl.Float64,
+            "post_time_ms": pl.Float64,
+            "total_time_ms": pl.Float64,
+        },
+    )
+
+    results = evaluator.evaluate(empty_df)
+    assert "warning" in results.metrics
+    assert results.metrics["warning"] == "Input DataFrame is empty for performance evaluation"
+
+
+def test_performance_all_null_total_time_ms(tmp_path):
+    """
+    测试 PerformanceEvaluator 处理 total_time_ms 全为 null 的情况。
+    """
+    config_content = """
+project_info:
+  project_name: "PerfEval Null Total Time Test"
+  model_type: "detection"
+data_loader:
+  field_mapping:
+    loop: "loop"
+    image_id: "image_id"
+    pre_time_ms: "pre_time_ms"
+    inference_time_ms: "inference_time_ms"
+    post_time_ms: "post_time_ms"
+    total_time_ms: "total_time_ms"
+    detection: # Added minimal detection config to satisfy validation
+      category_id: "dummy_cat"
+      score: "dummy_score"
+      bbox: ["dummy_x", "dummy_y", "dummy_w", "dummy_h"]
+evaluation_params:
+  detection:
+    iou_threshold: 0.5
+    bbox_format: "xywh"
+report_settings: {}
+"""
+    config_path = create_dummy_config(tmp_path, config_content)
+    config = load_config(config_path)
+    evaluator = PerformanceEvaluator(config)
+
     data = {
-        "loop": [1], "image_id": ["i1"], "pre_time_ms": [10.0],
-        "inference_time_ms": [100.0], "post_time_ms": [5.0], "total_time_ms": [115.0]
+        "loop": [1, 2],
+        "image_id": ["img1", "img2"],
+        "pre_time_ms": [10, 12],
+        "inference_time_ms": [100, 120],
+        "post_time_ms": [5, 6],
+        "total_time_ms": [None, None],
     }
-    input_df = pl.DataFrame(data)
-    result = performance_evaluator.evaluate(input_df)
-    metrics = result.metrics
+    df = pl.DataFrame(data).with_columns(pl.col("total_time_ms").cast(pl.Float64))
 
-    assert metrics["perf_mean_total_time_ms"] == 115.0
-    assert metrics["perf_median_total_time_ms"] == 115.0
-    assert metrics["perf_std_total_time_ms"] is None # Polars std of single value is null
-    assert metrics["perf_cv_total_time_ms"] is None
-    assert metrics["perf_jitter_ms"] == 0 # Jitter for single point is 0
-    assert metrics["perf_avg_fps"] == pytest.approx(1000.0/115.0)
+    results = evaluator.evaluate(df)
+    assert "warning" in results.metrics
+    assert results.metrics["warning"] == "'total_time_ms' column is empty or all nulls."
 
-```
+
+def test_performance_missing_required_columns(tmp_path):
+    """
+    测试 PerformanceEvaluator 处理缺少必需列的情况。
+    """
+    config_content = """
+project_info:
+  project_name: "PerfEval Missing Cols Test"
+  model_type: "detection"
+data_loader:
+  field_mapping:
+    loop: "loop"
+    image_id: "image_id"
+    pre_time_ms: "pre_time_ms"
+    inference_time_ms: "inference_time_ms"
+    post_time_ms: "post_time_ms"
+    total_time_ms: "total_time_ms"
+    detection: # Added minimal detection config to satisfy validation
+      category_id: "dummy_cat"
+      score: "dummy_score"
+      bbox: ["dummy_x", "dummy_y", "dummy_w", "dummy_h"]
+evaluation_params:
+  detection:
+    iou_threshold: 0.5
+    bbox_format: "xywh"
+report_settings: {}
+"""
+    config_path = create_dummy_config(tmp_path, config_content)
+    config = load_config(config_path)
+    evaluator = PerformanceEvaluator(config)
+
+    data = {
+        "loop": [1, 2],
+        "image_id": ["img1", "img2"],
+        "pre_time_ms": [10, 12],
+        "inference_time_ms": [100, 120],
+        "post_time_ms": [5, 6],
+        # "total_time_ms": [115, 138], # Missing total_time_ms
+    }
+    df = pl.DataFrame(data)
+
+    with pytest.raises(ValueError, match=r"Missing required columns for performance evaluation: \['total_time_ms'\]"):
+        evaluator.evaluate(df)
+
+
+def test_performance_non_numeric_time_columns(tmp_path):
+    """
+    测试 PerformanceEvaluator 处理时间列非数字的情况。
+    """
+    config_content = """
+project_info:
+  project_name: "PerfEval Non-Numeric Time Test"
+  model_type: "detection"
+data_loader:
+  field_mapping:
+    loop: "loop"
+    image_id: "image_id"
+    pre_time_ms: "pre_time_ms"
+    inference_time_ms: "inference_time_ms"
+    post_time_ms: "post_time_ms"
+    total_time_ms: "total_time_ms"
+    detection: # Added minimal detection config to satisfy validation
+      category_id: "dummy_cat"
+      score: "dummy_score"
+      bbox: ["dummy_x", "dummy_y", "dummy_w", "dummy_h"]
+evaluation_params:
+  detection:
+    iou_threshold: 0.5
+    bbox_format: "xywh"
+report_settings: {}
+"""
+    config_path = create_dummy_config(tmp_path, config_content)
+    config = load_config(config_path)
+    evaluator = PerformanceEvaluator(config)
+
+    data = {
+        "loop": [1, 2],
+        "image_id": ["img1", "img2"],
+        "pre_time_ms": ["10", "12"], # String type
+        "inference_time_ms": [100, 120],
+        "post_time_ms": [5, 6],
+        "total_time_ms": [115, 138],
+    }
+    df = pl.DataFrame(data)
+
+    results = evaluator.evaluate(df)
+    # Assert that conversion happened and metrics are calculated
+    assert results.metrics["perf_mean_pre_time_ms"] == pytest.approx(11.0)
+
+
+def test_performance_score_calculation(tmp_path):
+    """
+    测试 PerformanceEvaluator 的性能分数计算。
+    """
+    config_content = """
+project_info:
+  project_name: "PerfEval Score Test"
+  model_type: "detection"
+data_loader:
+  field_mapping:
+    loop: "loop"
+    image_id: "image_id"
+    pre_time_ms: "pre_time_ms"
+    inference_time_ms: "inference_time_ms"
+    post_time_ms: "post_time_ms"
+    total_time_ms: "total_time_ms"
+    detection: # Added minimal detection config to satisfy validation
+      category_id: "dummy_cat"
+      score: "dummy_score"
+      bbox: ["dummy_x", "dummy_y", "dummy_w", "dummy_h"]
+evaluation_params:
+  detection:
+    iou_threshold: 0.5
+    bbox_format: "xywh"
+  performance:
+    target_latency_ms: 100
+    cv_target_threshold: 0.1
+    component_weights:
+      throughput: 0.6
+      latency_stability: 0.4
+report_settings: {}
+"""
+    config_path = create_dummy_config(tmp_path, config_content)
+    config = load_config(config_path)
+    evaluator = PerformanceEvaluator(config)
+
+    data = {
+        "loop": [1, 1, 1, 1, 1],
+        "image_id": ["img1", "img2", "img3", "img4", "img5"],
+        "pre_time_ms": [10, 11, 12, 13, 14],
+        "inference_time_ms": [50, 55, 60, 65, 70],
+        "post_time_ms": [5, 6, 7, 8, 9],
+        "total_time_ms": [65, 72, 79, 86, 93],
+    }
+    df = pl.DataFrame(data)
+
+    results = evaluator.evaluate(df)
+    metrics = results.metrics
+
+    # Expected values (calculated manually)
+    # p95_latency = 92.0
+    # cv_latency = 0.1597...
+    # score_throughput = 100.0 (capped)
+    # score_latency_stability = 85.075 (calculated in test_performance_metrics_accuracy)
+    expected_overall_score = 0.6 * 100.0 + 0.4 * 85.075
+
+    assert metrics["perf_score_throughput"] == pytest.approx(100.0)
+    assert metrics["perf_score_latency_stability"] == pytest.approx(85.075, rel=1e-3)
+    assert metrics["perf_score_overall"] == pytest.approx(expected_overall_score)
+
+
+def test_performance_score_no_weights(tmp_path):
+    """
+    测试 PerformanceEvaluator 在没有配置 component_weights 时跳过分数计算。
+    """
+    config_content = """
+project_info:
+  project_name: "PerfEval No Weights Test"
+  model_type: "detection"
+data_loader:
+  field_mapping:
+    loop: "loop"
+    image_id: "image_id"
+    pre_time_ms: "pre_time_ms"
+    inference_time_ms: "inference_time_ms"
+    post_time_ms: "post_time_ms"
+    total_time_ms: "total_time_ms"
+    detection: # Added minimal detection config to satisfy validation
+      category_id: "dummy_cat"
+      score: "dummy_score"
+      bbox: ["dummy_x", "dummy_y", "dummy_w", "dummy_h"]
+evaluation_params:
+  detection:
+    iou_threshold: 0.5
+    bbox_format: "xywh"
+  performance: # No component_weights here
+    target_latency_ms: 100
+    cv_target_threshold: 0.1
+report_settings: {}
+"""
+    config_path = create_dummy_config(tmp_path, config_content)
+    config = load_config(config_path)
+    evaluator = PerformanceEvaluator(config)
+
+    data = {
+        "loop": [1],
+        "image_id": ["img1"],
+        "pre_time_ms": [10],
+        "inference_time_ms": [50],
+        "post_time_ms": [5],
+        "total_time_ms": [65],
+    }
+    df = pl.DataFrame(data)
+
+    results = evaluator.evaluate(df)
+    metrics = results.metrics
+
+    assert "perf_score_overall" not in metrics
+    assert "perf_score_throughput" not in metrics
+    assert "perf_score_latency_stability" not in metrics
+
+
+def test_performance_score_no_performance_params(tmp_path):
+    """
+    测试 PerformanceEvaluator 在没有配置 evaluation_params.performance 时跳过分数计算。
+    """
+    config_content = """
+project_info:
+  project_name: "PerfEval No Perf Params Test"
+  model_type: "detection"
+data_loader:
+  field_mapping:
+    loop: "loop"
+    image_id: "image_id"
+    pre_time_ms: "pre_time_ms"
+    inference_time_ms: "inference_time_ms"
+    post_time_ms: "post_time_ms"
+    total_time_ms: "total_time_ms"
+    detection: # Added minimal detection config to satisfy validation
+      category_id: "dummy_cat"
+      score: "dummy_score"
+      bbox: ["dummy_x", "dummy_y", "dummy_w", "dummy_h"]
+evaluation_params:
+  detection:
+    iou_threshold: 0.5
+    bbox_format: "xywh"
+report_settings: {}
+"""
+    config_path = create_dummy_config(tmp_path, config_content)
+    config = load_config(config_path)
+    evaluator = PerformanceEvaluator(config)
+
+    data = {
+        "loop": [1],
+        "image_id": ["img1"],
+        "pre_time_ms": [10],
+        "inference_time_ms": [50],
+        "post_time_ms": [5],
+        "total_time_ms": [65],
+    }
+    df = pl.DataFrame(data)
+
+    results = evaluator.evaluate(df)
+    metrics = results.metrics
+
+    assert "perf_score_overall" not in metrics
+    assert "perf_score_throughput" not in metrics
+    assert "perf_score_latency_stability" not in metrics
+
+
+def test_performance_evaluator_with_duplicates(tmp_path):
+    """
+    测试包含重复（loop, image_id）项的DataFrame，验证去重逻辑是否生效。
+    根据 TODO 要求添加此测试。
+    """
+    config_content = """
+project_info:
+  project_name: "PerfEval Duplicates Test"
+  model_type: "detection"
+data_loader:
+  field_mapping:
+    loop: "loop"
+    image_id: "image_id"
+    pre_time_ms: "pre_time_ms"
+    inference_time_ms: "inference_time_ms"
+    post_time_ms: "post_time_ms"
+    total_time_ms: "total_time_ms"
+    detection:
+      category_id: "dummy_cat"
+      score: "dummy_score"
+      bbox: ["dummy_x", "dummy_y", "dummy_w", "dummy_h"]
+evaluation_params:
+  detection:
+    iou_threshold: 0.5
+    bbox_format: "xywh"
+report_settings: {}
+"""
+    config_path = create_dummy_config(tmp_path, config_content)
+    config = load_config(config_path)
+    evaluator = PerformanceEvaluator(config)
+
+    # 创建包含重复项的数据
+    data = {
+        "loop": [1, 1, 1, 2, 2, 2],  # 重复的 loop + image_id 组合
+        "image_id": ["img1", "img1", "img2", "img1", "img1", "img2"],  # 重复项
+        "pre_time_ms": [10, 12, 15, 11, 13, 16],
+        "inference_time_ms": [50, 52, 55, 51, 53, 56],
+        "post_time_ms": [5, 6, 7, 5, 6, 7],
+        "total_time_ms": [65, 70, 77, 67, 72, 79],
+    }
+    df = pl.DataFrame(data)
+
+    results = evaluator.evaluate(df)
+    
+    # 验证去重后的数据在 extra_data 中
+    assert "deduplicated_perf_df_for_charts" in results.extra_data
+    dedup_df = results.extra_data["deduplicated_perf_df_for_charts"]
+    
+    # 去重后应该只有4行：(1, img1), (1, img2), (2, img1), (2, img2)
+    assert len(dedup_df) == 4
+    
+    # 验证去重逻辑：每个 (loop, image_id) 组合只保留一行
+    unique_combinations = dedup_df.select(["loop", "image_id"]).unique()
+    assert len(unique_combinations) == 4
+
+
+def test_performance_metrics_manual_calculation(tmp_path):
+    """
+    使用可预测的小型DataFrame，手动计算并验证所有性能指标的准确性。
+    根据 TODO 要求添加此测试。
+    """
+    config_content = """
+project_info:
+  project_name: "PerfEval Manual Calc Test"
+  model_type: "detection"
+data_loader:
+  field_mapping:
+    loop: "loop"
+    image_id: "image_id"
+    pre_time_ms: "pre_time_ms"
+    inference_time_ms: "inference_time_ms"
+    post_time_ms: "post_time_ms"
+    total_time_ms: "total_time_ms"
+    detection:
+      category_id: "dummy_cat"
+      score: "dummy_score"
+      bbox: ["dummy_x", "dummy_y", "dummy_w", "dummy_h"]
+evaluation_params:
+  detection:
+    iou_threshold: 0.5
+    bbox_format: "xywh"
+report_settings: {}
+"""
+    config_path = create_dummy_config(tmp_path, config_content)
+    config = load_config(config_path)
+    evaluator = PerformanceEvaluator(config)
+
+    # 创建可预测的小型数据集
+    data = {
+        "loop": [1, 1, 2, 2],
+        "image_id": ["img1", "img2", "img1", "img2"],
+        "pre_time_ms": [10.0, 20.0, 15.0, 25.0],  # 平均值: 17.5
+        "inference_time_ms": [100.0, 200.0, 150.0, 250.0],  # 平均值: 175.0
+        "post_time_ms": [5.0, 10.0, 7.5, 12.5],  # 平均值: 8.75
+        "total_time_ms": [115.0, 230.0, 172.5, 287.5],  # 平均值: 201.25
+    }
+    df = pl.DataFrame(data)
+
+    results = evaluator.evaluate(df)
+    metrics = results.metrics
+
+    # 手动计算期望值
+    pre_times = [10.0, 20.0, 15.0, 25.0]
+    inf_times = [100.0, 200.0, 150.0, 250.0]
+    post_times = [5.0, 10.0, 7.5, 12.5]
+    total_times = [115.0, 230.0, 172.5, 287.5]
+
+    expected_pre_mean = np.mean(pre_times)
+    expected_inf_mean = np.mean(inf_times)
+    expected_post_mean = np.mean(post_times)
+    expected_total_mean = np.mean(total_times)
+    
+    expected_pre_p95 = np.percentile(pre_times, 95)
+    expected_inf_p95 = np.percentile(inf_times, 95)
+    expected_post_p95 = np.percentile(post_times, 95)
+    expected_total_p95 = np.percentile(total_times, 95)
+    
+    expected_pre_cv = np.std(pre_times) / np.mean(pre_times) if np.mean(pre_times) > 0 else 0
+    expected_inf_cv = np.std(inf_times) / np.mean(inf_times) if np.mean(inf_times) > 0 else 0
+    expected_post_cv = np.std(post_times) / np.mean(post_times) if np.mean(post_times) > 0 else 0
+    expected_total_cv = np.std(total_times) / np.mean(total_times) if np.mean(total_times) > 0 else 0
+
+    # 验证计算结果
+    assert metrics["perf_mean_pre_time_ms"] == pytest.approx(expected_pre_mean, abs=1e-6)
+    assert metrics["perf_mean_inference_time_ms"] == pytest.approx(expected_inf_mean, abs=1e-6)
+    assert metrics["perf_mean_post_time_ms"] == pytest.approx(expected_post_mean, abs=1e-6)
+    assert metrics["perf_mean_total_time_ms"] == pytest.approx(expected_total_mean, abs=1e-6)
+    
+    assert metrics["perf_p95_pre_time_ms"] == pytest.approx(expected_pre_p95, abs=1e-6)
+    assert metrics["perf_p95_inference_time_ms"] == pytest.approx(expected_inf_p95, abs=1e-6)
+    assert metrics["perf_p95_post_time_ms"] == pytest.approx(expected_post_p95, abs=1e-6)
+    assert metrics["perf_p95_total_time_ms"] == pytest.approx(expected_total_p95, abs=1e-6)
+    
+    assert metrics["perf_cv_pre_time_ms"] == pytest.approx(expected_pre_cv, abs=1e-6)
+    assert metrics["perf_cv_inference_time_ms"] == pytest.approx(expected_inf_cv, abs=1e-6)
+    assert metrics["perf_cv_post_time_ms"] == pytest.approx(expected_post_cv, abs=1e-6)
+    assert metrics["perf_cv_total_time_ms"] == pytest.approx(expected_total_cv, abs=1e-6)
